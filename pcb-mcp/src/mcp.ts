@@ -6,7 +6,18 @@ import { z } from "zod";
 import { emptyStats } from "./board.js";
 import { runDomainChecks, runPlacementGate, type CheckDomain } from "./checks.js";
 import { compileTsx } from "./compile.js";
+import {
+  applyMove,
+  applyReassignNet,
+  applyRotate,
+  applySwapPackage,
+  getSelection,
+  listViews,
+  refuseLiveCreation,
+  REFUSED_LIVE_OPS,
+} from "./live.js";
 import { applyAnchoredPatch } from "./patch.js";
+import { enqueue } from "./queue.js";
 import {
   appendLog,
   getBoardState,
@@ -68,6 +79,7 @@ const CodePatchInput = z.object({
 const CodePatchOutput = z.object({
   sessionId: z.string(),
   applied: z.boolean(),
+  ready: z.boolean(),
   stats: z.object({
     total: z.number(),
     components: z.number(),
@@ -123,6 +135,57 @@ const RunChecksOutput = z.object({
   violations: z.array(ViolationOutput),
   errors: z.number(),
   warnings: z.number(),
+});
+
+const LiveManageInput = z.object({
+  session_id: z.string().optional().describe("Session mono-board (défaut: default)"),
+  op: z.string().describe("move | rotate | swap_package | reassign_net | select | view"),
+  refdes: z.string().optional().describe("Composant visé (ex R1)"),
+  x: z.number().optional().describe("move : pcbX en mm"),
+  y: z.number().optional().describe("move : pcbY en mm"),
+  degrees: z.number().optional().describe("rotate : pcbRotation en degrés"),
+  footprint: z.string().optional().describe("swap_package : empreinte cible (ex 0603)"),
+  pin: z.string().optional().describe("reassign_net : pin visée (ex pin1)"),
+  net: z.string().optional().describe("reassign_net : net cible (ex GND ou net.GND)"),
+  disableCdnLoading: z
+    .boolean()
+    .optional()
+    .describe(" true = offline strict (bandeau si dégradation réseau)"),
+});
+
+const LiveManageOutput = z.object({
+  sessionId: z.string(),
+  op: z.string(),
+  applied: z.boolean(),
+  ready: z.boolean(),
+  stats: z.object({
+    total: z.number(),
+    components: z.number(),
+    traces: z.number(),
+    nets: z.number(),
+    byType: z.record(z.string(), z.number()),
+  }),
+  diagnostics: z.array(
+    z.object({ severity: z.string(), message: z.string(), source: z.string() }),
+  ),
+  mode: z.string(),
+  banner: z.string().nullable(),
+  errors: z.number(),
+  warnings: z.number(),
+  circuitJsonLength: z.number(),
+  circuitJson: z.array(z.any()),
+  code: z.string().nullable(),
+  selection: z
+    .object({
+      refdes: z.string(),
+      pkg: z.string(),
+      value: z.string(),
+      rotation: z.number(),
+      nets: z.array(z.string()),
+    })
+    .nullable(),
+  views: z.array(z.string()).nullable(),
+  message: z.string().nullable(),
 });
 
 export function buildFactory() {
@@ -198,65 +261,69 @@ export function buildFactory() {
         annotations: { readOnlyHint: false, destructiveHint: true },
       },
       async ({ session_id, anchor, replacement, disableCdnLoading }) => {
-        const sessionId = session_id ?? "default";
-        const patched = applyAnchoredPatch(getCode(), anchor, replacement);
-        if (!patched.ok) {
+        return enqueue(async () => {
+          const sessionId = session_id ?? "default";
+          const patched = applyAnchoredPatch(getCode(), anchor, replacement);
+          if (!patched.ok) {
+            const output = {
+              sessionId,
+              applied: false as const,
+              ready: getBoardState(sessionId).ready,
+              stats: emptyStats(),
+              diagnostics: [
+                { severity: "error", message: patched.message, source: "code_patch" },
+              ],
+              mode: "echec",
+              banner: null as string | null,
+              errors: 1,
+              warnings: 0,
+              circuitJsonLength: 0,
+              circuitJson: [] as unknown[],
+            };
+            appendLog("error", "compile", `code_patch rejeté : ${patched.message}`);
+            return {
+              content: [{ type: "text", text: JSON.stringify(output) }],
+              structuredContent: output,
+            };
+          }
+          setCode(patched.code);
+          const compiled = await compileTsx(patched.code, { disableCdnLoading });
+          setLastCompile({
+            status: compiled.errors === 0 ? "ok" : "error",
+            errors: compiled.errors,
+            warnings: compiled.warnings,
+          });
+          if (compiled.errors === 0) {
+            appendLog(
+              "info",
+              "compile",
+              `code_patch ok : ${compiled.stats.total} éléments, 0 erreur`,
+            );
+          } else {
+            appendLog(
+              "error",
+              "compile",
+              `code_patch compile en erreur : ${compiled.diagnostics[0]?.message ?? "inconnu"}`,
+            );
+          }
           const output = {
             sessionId,
-            applied: false as const,
-            stats: emptyStats(),
-            diagnostics: [
-              { severity: "error", message: patched.message, source: "code_patch" },
-            ],
-            mode: "echec",
-            banner: null as string | null,
-            errors: 1,
-            warnings: 0,
-            circuitJsonLength: 0,
-            circuitJson: [] as unknown[],
+            applied: true as const,
+            ready: compiled.errors === 0,
+            stats: compiled.stats,
+            diagnostics: compiled.diagnostics,
+            mode: compiled.mode,
+            banner: compiled.banner,
+            errors: compiled.errors,
+            warnings: compiled.warnings,
+            circuitJsonLength: compiled.circuitJson.length,
+            circuitJson: compiled.circuitJson,
           };
-          appendLog("error", "compile", `code_patch rejeté : ${patched.message}`);
           return {
             content: [{ type: "text", text: JSON.stringify(output) }],
             structuredContent: output,
           };
-        }
-        setCode(patched.code);
-        const compiled = await compileTsx(patched.code, { disableCdnLoading });
-        setLastCompile({
-          status: compiled.errors === 0 ? "ok" : "error",
-          errors: compiled.errors,
-          warnings: compiled.warnings,
         });
-        if (compiled.errors === 0) {
-          appendLog(
-            "info",
-            "compile",
-            `code_patch ok : ${compiled.stats.total} éléments, 0 erreur`,
-          );
-        } else {
-          appendLog(
-            "error",
-            "compile",
-            `code_patch compile en erreur : ${compiled.diagnostics[0]?.message ?? "inconnu"}`,
-          );
-        }
-        const output = {
-          sessionId,
-          applied: true as const,
-          stats: compiled.stats,
-          diagnostics: compiled.diagnostics,
-          mode: compiled.mode,
-          banner: compiled.banner,
-          errors: compiled.errors,
-          warnings: compiled.warnings,
-          circuitJsonLength: compiled.circuitJson.length,
-          circuitJson: compiled.circuitJson,
-        };
-        return {
-          content: [{ type: "text", text: JSON.stringify(output) }],
-          structuredContent: output,
-        };
       },
     );
 
@@ -349,6 +416,288 @@ export function buildFactory() {
           content: [{ type: "text", text: JSON.stringify(output) }],
           structuredContent: output,
         };
+      },
+    );
+
+    server.registerTool(
+      "live_manage",
+      {
+        title: "Live-mutation restreinte write-through",
+        description:
+          "Mutation live restreinte (move | rotate | swap_package | reassign_net + select/view) : réécrit le TSX aussitôt puis recompile, readiness stampée. Création/suppression refusées vers code_patch. Écritures sérialisées par la file.",
+        inputSchema: LiveManageInput,
+        outputSchema: LiveManageOutput,
+        annotations: { readOnlyHint: false, destructiveHint: true },
+      },
+      async ({ session_id, op, refdes, x, y, degrees, footprint, pin, net, disableCdnLoading }) => {
+        const sessionId = session_id ?? "default";
+        const asked = (op ?? "").trim();
+
+        const refused = (REFUSED_LIVE_OPS as readonly string[]).includes(asked);
+        if (refused || asked === "create") {
+          const message = refuseLiveCreation(asked || "create");
+          const ready = getBoardState(sessionId).ready;
+          const output = {
+            sessionId,
+            op: asked,
+            applied: false as const,
+            ready,
+            stats: emptyStats(),
+            diagnostics: [{ severity: "error", message, source: "live_manage" }],
+            mode: "refuse",
+            banner: null as string | null,
+            errors: 1,
+            warnings: 0,
+            circuitJsonLength: 0,
+            circuitJson: [] as unknown[],
+            code: null as string | null,
+            selection: null,
+            views: null as string[] | null,
+            message,
+          };
+          appendLog("error", "compile", `live_manage ${asked} refusé : ${message}`);
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        }
+
+        if (asked === "select") {
+          if (!refdes) {
+            const message = "select exige refdes (ex R1)";
+            const ready = getBoardState(sessionId).ready;
+            const output = {
+              sessionId,
+              op: asked,
+              applied: false as const,
+              ready,
+              stats: emptyStats(),
+              diagnostics: [{ severity: "error", message, source: "live_manage" }],
+              mode: "refuse",
+              banner: null as string | null,
+              errors: 1,
+              warnings: 0,
+              circuitJsonLength: 0,
+              circuitJson: [] as unknown[],
+              code: getCode(),
+              selection: null,
+              views: null as string[] | null,
+              message,
+            };
+            return {
+              content: [{ type: "text", text: JSON.stringify(output) }],
+              structuredContent: output,
+            };
+          }
+          const selection = getSelection(getCode(), refdes);
+          const ready = getBoardState(sessionId).ready;
+          if (!selection) {
+            const message = `composant ${refdes} introuvable dans le TSX`;
+            const output = {
+              sessionId,
+              op: asked,
+              applied: false as const,
+              ready,
+              stats: emptyStats(),
+              diagnostics: [{ severity: "error", message, source: "live_manage" }],
+              mode: "lecture",
+              banner: null as string | null,
+              errors: 1,
+              warnings: 0,
+              circuitJsonLength: 0,
+              circuitJson: [] as unknown[],
+              code: getCode(),
+              selection: null,
+              views: null as string[] | null,
+              message,
+            };
+            return {
+              content: [{ type: "text", text: JSON.stringify(output) }],
+              structuredContent: output,
+            };
+          }
+          const output = {
+            sessionId,
+            op: asked,
+            applied: true as const,
+            ready,
+            stats: emptyStats(),
+            diagnostics: [],
+            mode: "lecture",
+            banner: null as string | null,
+            errors: 0,
+            warnings: 0,
+            circuitJsonLength: 0,
+            circuitJson: [] as unknown[],
+            code: getCode(),
+            selection,
+            views: null as string[] | null,
+            message: null as string | null,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        }
+
+        if (asked === "view") {
+          const ready = getBoardState(sessionId).ready;
+          const views = listViews();
+          const output = {
+            sessionId,
+            op: asked,
+            applied: true as const,
+            ready,
+            stats: emptyStats(),
+            diagnostics: [],
+            mode: "lecture",
+            banner: null as string | null,
+            errors: 0,
+            warnings: 0,
+            circuitJsonLength: 0,
+            circuitJson: [] as unknown[],
+            code: getCode(),
+            selection: null,
+            views,
+            message: null as string | null,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        }
+
+        // Mutations write-through sérialisées par la file.
+        return enqueue(async () => {
+          const code = getCode();
+          let mutated;
+          switch (asked) {
+            case "move":
+              if (x === undefined || y === undefined) {
+                mutated = { ok: false as const, message: "move exige x et y (nombres, mm)" };
+              } else {
+                mutated = applyMove(code, refdes ?? "", x, y);
+              }
+              break;
+            case "rotate":
+              if (degrees === undefined) {
+                mutated = { ok: false as const, message: "rotate exige degrees (nombre)" };
+              } else {
+                mutated = applyRotate(code, refdes ?? "", degrees);
+              }
+              break;
+            case "swap_package":
+              if (!footprint) {
+                mutated = { ok: false as const, message: "swap_package exige footprint (ex 0603)" };
+              } else {
+                mutated = applySwapPackage(code, refdes ?? "", footprint);
+              }
+              break;
+            case "reassign_net":
+              if (!pin || !net) {
+                mutated = { ok: false as const, message: "reassign_net exige pin et net (ex pin1, GND)" };
+              } else {
+                mutated = applyReassignNet(code, refdes ?? "", pin, net);
+              }
+              break;
+            default: {
+              const message =
+                `op live "${asked}" inconnue (live V1 : move | rotate | swap_package | reassign_net + select/view) — ` +
+                `création/suppression via code_patch`;
+              const ready = getBoardState(sessionId).ready;
+              const output = {
+                sessionId,
+                op: asked,
+                applied: false as const,
+                ready,
+                stats: emptyStats(),
+                diagnostics: [{ severity: "error", message, source: "live_manage" }],
+                mode: "refuse",
+                banner: null as string | null,
+                errors: 1,
+                warnings: 0,
+                circuitJsonLength: 0,
+                circuitJson: [] as unknown[],
+                code: null as string | null,
+                selection: null,
+                views: null as string[] | null,
+                message,
+              };
+              appendLog("error", "compile", `live_manage ${asked} inconnu`);
+              return {
+                content: [{ type: "text", text: JSON.stringify(output) }],
+                structuredContent: output,
+              };
+            }
+          }
+          if (!mutated.ok) {
+            const ready = getBoardState(sessionId).ready;
+            const output = {
+              sessionId,
+              op: asked,
+              applied: false as const,
+              ready,
+              stats: emptyStats(),
+              diagnostics: [
+                { severity: "error", message: mutated.message, source: "live_manage" },
+              ],
+              mode: "refuse",
+              banner: null as string | null,
+              errors: 1,
+              warnings: 0,
+              circuitJsonLength: 0,
+              circuitJson: [] as unknown[],
+              code: null as string | null,
+              selection: null,
+              views: null as string[] | null,
+              message: mutated.message,
+            };
+            appendLog("error", "compile", `live_manage ${asked} rejeté : ${mutated.message}`);
+            return {
+              content: [{ type: "text", text: JSON.stringify(output) }],
+              structuredContent: output,
+            };
+          }
+          setCode(mutated.code);
+          const compiled = await compileTsx(mutated.code, { disableCdnLoading });
+          const ready = compiled.errors === 0;
+          setLastCompile({
+            status: compiled.errors === 0 ? "ok" : "error",
+            errors: compiled.errors,
+            warnings: compiled.warnings,
+          });
+          if (compiled.errors === 0) {
+            appendLog("info", "compile", `live_manage ${asked} ok : ${compiled.stats.total} éléments, 0 erreur`);
+          } else {
+            appendLog(
+              "error",
+              "compile",
+              `live_manage ${asked} compile en erreur : ${compiled.diagnostics[0]?.message ?? "inconnu"}`,
+            );
+          }
+          const output = {
+            sessionId,
+            op: asked,
+            applied: true as const,
+            ready,
+            stats: compiled.stats,
+            diagnostics: compiled.diagnostics,
+            mode: compiled.mode,
+            banner: compiled.banner,
+            errors: compiled.errors,
+            warnings: compiled.warnings,
+            circuitJsonLength: compiled.circuitJson.length,
+            circuitJson: compiled.circuitJson,
+            code: mutated.code,
+            selection: null,
+            views: null as string[] | null,
+            message: null as string | null,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        });
       },
     );
 

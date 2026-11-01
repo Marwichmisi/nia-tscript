@@ -19,7 +19,7 @@ export function getBoardState(sessionId = "default"): BoardState {
   return {
     sessionId,
     board: "nia-demo",
-    ready: true,
+    ready: compile.status === "ok",
     compile,
     drc: { violations: lastDrcViolations },
     protocolVersion: PROTOCOL_VERSION,

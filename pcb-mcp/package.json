@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Sidecar MCP (HTTP stateless 2026-07-28 + fallback legacy initialize) — tickets #10 (lecture) + #12 (compile worker + code_patch) + #13 (gate placement + run_checks natifs)",
+  "description": "Sidecar MCP (HTTP stateless 2026-07-28 + fallback legacy initialize) — tickets #10 (lecture) + #12 (compile worker + code_patch) + #13 (gate placement + run_checks natifs) + #14 (live restreinte write-through + file)",
   "scripts": {
     "build": "node scripts/build.mjs",
     "dev": "bun src/server.ts serve --port 4123",
