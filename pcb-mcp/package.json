@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Sidecar MCP (HTTP stateless 2026-07-28 + fallback legacy initialize) — tickets #10 (lecture) + #12 (compile worker + code_patch)",
+  "description": "Sidecar MCP (HTTP stateless 2026-07-28 + fallback legacy initialize) — tickets #10 (lecture) + #12 (compile worker + code_patch) + #13 (gate placement + run_checks natifs)",
   "scripts": {
     "build": "node scripts/build.mjs",
     "dev": "bun src/server.ts serve --port 4123",
@@ -13,6 +13,7 @@
   "dependencies": {
     "@modelcontextprotocol/node": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
+    "@tscircuit/checks": "0.0.269",
     "@tscircuit/core": "0.0.2245",
     "@tscircuit/eval": "0.0.1681",
     "@tscircuit/props": "0.0.715",

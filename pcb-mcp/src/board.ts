@@ -19,6 +19,22 @@ export const BOARD_CODE = `export default () => (
 
 export const ENTRYPOINT = "main.tsx";
 
+/** Fixture preuve #13 : placement invalide (R1/R2 superposés en 0,0). */
+export const BOARD_INVALID_PLACEMENT = `export default () => (
+  <board width="20mm" height="20mm">
+    <resistor name="R1" resistance="10k" footprint="0402" pcbX={0} pcbY={0} />
+    <resistor name="R2" resistance="10k" footprint="0402" pcbX={0} pcbY={0} />
+    <chip name="U1" footprint="sot23" pcbX={5} pcbY={0} />
+    <trace from=".R1 > .pin1" to="net.VCC" />
+    <trace from=".R1 > .pin2" to=".R2 > .pin1" />
+    <trace from=".R1 > .pin2" to=".U1 > .pin1" />
+    <trace from=".R2 > .pin2" to="net.GND" />
+    <trace from=".U1 > .pin2" to="net.GND" />
+    <trace from=".U1 > .pin3" to="net.VCC" />
+  </board>
+)
+`;
+
 export function initialFsMap(): Record<string, string> {
   return { [ENTRYPOINT]: BOARD_CODE };
 }

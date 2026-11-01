@@ -21,7 +21,7 @@ export function getBoardState(sessionId = "default"): BoardState {
     board: "nia-demo",
     ready: true,
     compile,
-    drc: { violations: 0 },
+    drc: { violations: lastDrcViolations },
     protocolVersion: PROTOCOL_VERSION,
   };
 }
@@ -97,6 +97,7 @@ const LOGS: LogEntry[] = [...SEED_LOGS];
 let nextSeq = SEED_LOGS.length + 1;
 let currentCode: string = BOARD_CODE;
 let lastCompile: BoardState["compile"] | null = null;
+let lastDrcViolations = 0;
 
 /** Remet le store à la fixture (isolation des tests). */
 export function resetStoreForTests(): void {
@@ -105,6 +106,7 @@ export function resetStoreForTests(): void {
   nextSeq = SEED_LOGS.length + 1;
   currentCode = BOARD_CODE;
   lastCompile = null;
+  lastDrcViolations = 0;
 }
 
 export function getCode(): string {
@@ -118,6 +120,11 @@ export function setCode(code: string): void {
 
 export function setLastCompile(status: BoardState["compile"]): void {
   lastCompile = status;
+}
+
+/** Dernier compte de violations DRC/checks (reflet `pcb_state.drc`). */
+export function setDrcViolations(n: number): void {
+  lastDrcViolations = n;
 }
 
 export function appendLog(

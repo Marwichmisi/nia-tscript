@@ -4,6 +4,7 @@
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { emptyStats } from "./board.js";
+import { runDomainChecks, runPlacementGate, type CheckDomain } from "./checks.js";
 import { compileTsx } from "./compile.js";
 import { applyAnchoredPatch } from "./patch.js";
 import {
@@ -13,6 +14,7 @@ import {
   getHierarchy,
   readLogs,
   setCode,
+  setDrcViolations,
   setLastCompile,
 } from "./state.js";
 
@@ -82,6 +84,45 @@ const CodePatchOutput = z.object({
   warnings: z.number(),
   circuitJsonLength: z.number(),
   circuitJson: z.array(z.any()),
+});
+
+const RunChecksInput = z.object({
+  session_id: z.string().optional().describe("Session mono-board (défaut: default)"),
+  domain: z
+    .enum(["netlist", "placement", "routing", "style", "all"])
+    .optional()
+    .describe("Domaine natif (défaut: all) ; routing refusé si placement non vert"),
+  disableCdnLoading: z
+    .boolean()
+    .optional()
+    .describe(" true = offline strict (bandeau si dégradation réseau)"),
+});
+
+const ViolationOutput = z.object({
+  domain: z.string(),
+  type: z.string(),
+  message: z.string(),
+  x: z.number().nullable(),
+  y: z.number().nullable(),
+  refdes: z.string().nullable(),
+});
+
+const RunChecksOutput = z.object({
+  sessionId: z.string(),
+  domain: z.string(),
+  placementGreen: z.boolean(),
+  routingAllowed: z.boolean(),
+  blockReason: z.string().nullable(),
+  counts: z.object({
+    netlist: z.number(),
+    placement: z.number(),
+    routing: z.number(),
+    style: z.number(),
+    total: z.number(),
+  }),
+  violations: z.array(ViolationOutput),
+  errors: z.number(),
+  warnings: z.number(),
 });
 
 export function buildFactory() {
@@ -211,6 +252,98 @@ export function buildFactory() {
           warnings: compiled.warnings,
           circuitJsonLength: compiled.circuitJson.length,
           circuitJson: compiled.circuitJson,
+        };
+        return {
+          content: [{ type: "text", text: JSON.stringify(output) }],
+          structuredContent: output,
+        };
+      },
+    );
+
+    server.registerTool(
+      "run_checks",
+      {
+        title: "Contrôles natifs + gate placement",
+        description:
+          "Lance les contrôles natifs tscircuit (netlist, placement, routing, style PCB) sur le TSX courant et retourne les violations positionnées. Gate dur : le domaine routing est refusé tant que le placement n'est pas vert (coordonnées pcbX/pcbY explicites exigées).",
+        inputSchema: RunChecksInput,
+        outputSchema: RunChecksOutput,
+        annotations: { readOnlyHint: true, destructiveHint: false },
+      },
+      async ({ session_id, domain, disableCdnLoading }) => {
+        const sessionId = session_id ?? "default";
+        const asked: CheckDomain = domain ?? "all";
+        const code = getCode();
+        const compiled = await compileTsx(code, { disableCdnLoading });
+        if (compiled.errors !== 0) {
+          const output = {
+            sessionId,
+            domain: asked,
+            placementGreen: false,
+            routingAllowed: false,
+            blockReason: `compile en erreur : ${compiled.diagnostics[0]?.message ?? "inconnu"} — corrigez via code_patch avant tout check`,
+            counts: { netlist: 0, placement: 0, routing: 0, style: 0, total: 0 },
+            violations: [],
+            errors: 1,
+            warnings: 0,
+          };
+          appendLog("error", "drc", `run_checks ${asked} impossible : compile en erreur`);
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        }
+        const gate = await runPlacementGate(compiled.circuitJson, code);
+        // Gate dur : aucun routing tant que le placement n'est pas vert.
+        if (asked === "routing" && !gate.routingAllowed) {
+          const output = {
+            sessionId,
+            domain: asked,
+            placementGreen: gate.placementGreen,
+            routingAllowed: false,
+            blockReason: gate.blockReason,
+            counts: {
+              netlist: 0,
+              placement: gate.placementViolations.length,
+              routing: 0,
+              style: 0,
+              total: gate.placementViolations.length,
+            },
+            violations: gate.placementViolations,
+            errors: 1,
+            warnings: 0,
+          };
+          setDrcViolations(gate.placementViolations.length);
+          appendLog("error", "drc", `run_checks routing refusé : ${gate.blockReason ?? "placement non vert"}`);
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        }
+        const violations = await runDomainChecks(compiled.circuitJson, asked);
+        const counts = {
+          netlist: violations.filter((v) => v.domain === "netlist").length,
+          placement: violations.filter((v) => v.domain === "placement").length,
+          routing: violations.filter((v) => v.domain === "routing").length,
+          style: violations.filter((v) => v.domain === "style").length,
+          total: violations.length,
+        };
+        setDrcViolations(counts.total);
+        appendLog(
+          violations.length === 0 ? "info" : "warn",
+          "drc",
+          `run_checks ${asked} : ${violations.length} violation(s), placement ${gate.placementGreen ? "vert" : "rouge"}`,
+        );
+        const output = {
+          sessionId,
+          domain: asked,
+          placementGreen: gate.placementGreen,
+          routingAllowed: gate.routingAllowed,
+          blockReason: gate.blockReason,
+          counts,
+          violations,
+          errors: 0,
+          warnings: 0,
         };
         return {
           content: [{ type: "text", text: JSON.stringify(output) }],
