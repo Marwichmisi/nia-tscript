@@ -1,6 +1,7 @@
-// État lecture seule (fixtures MVP, mono-board).
-// Le TSX reste la seule source de vérité ; ces fixtures seront branchées
-// sur le worker compile + la file V1 dans les tickets suivants.
+// État lecture seule (fixtures MVP, mono-board) + store TSX write-through (#12).
+// Le TSX reste la seule source de vérité ; le store en mémoire est initialisé
+// avec la fixture R1/R2+U1 du prototype et muté uniquement via `code_patch`.
+import { BOARD_CODE } from "./board.js";
 
 export interface BoardState {
   sessionId: string;
@@ -14,11 +15,12 @@ export interface BoardState {
 export const PROTOCOL_VERSION = "2026-07-28";
 
 export function getBoardState(sessionId = "default"): BoardState {
+  const compile = lastCompile ?? { status: "ok" as const, errors: 0, warnings: 0 };
   return {
     sessionId,
     board: "nia-demo",
     ready: true,
-    compile: { status: "ok", errors: 0, warnings: 0 },
+    compile,
     drc: { violations: 0 },
     protocolVersion: PROTOCOL_VERSION,
   };
@@ -90,6 +92,50 @@ const SEED_LOGS: LogEntry[] = [
   { seq: 5, ts: "2026-11-01T00:00:05Z", level: "error", source: "compile", message: "exemple : net flottant NC-1 (fixture)" },
 ];
 
+// Store mutable mono-board (#12) : TSX courant + dernier statut compile + logs.
+const LOGS: LogEntry[] = [...SEED_LOGS];
+let nextSeq = SEED_LOGS.length + 1;
+let currentCode: string = BOARD_CODE;
+let lastCompile: BoardState["compile"] | null = null;
+
+/** Remet le store à la fixture (isolation des tests). */
+export function resetStoreForTests(): void {
+  LOGS.length = 0;
+  LOGS.push(...SEED_LOGS);
+  nextSeq = SEED_LOGS.length + 1;
+  currentCode = BOARD_CODE;
+  lastCompile = null;
+}
+
+export function getCode(): string {
+  return currentCode;
+}
+
+/** Écrit le TSX courant (write-through via `code_patch`). */
+export function setCode(code: string): void {
+  currentCode = code;
+}
+
+export function setLastCompile(status: BoardState["compile"]): void {
+  lastCompile = status;
+}
+
+export function appendLog(
+  level: LogEntry["level"],
+  source: LogEntry["source"],
+  message: string,
+): LogEntry {
+  const entry: LogEntry = {
+    seq: nextSeq++,
+    ts: new Date().toISOString(),
+    level,
+    source,
+    message,
+  };
+  LOGS.push(entry);
+  return entry;
+}
+
 export function readLogs(opts: { cursor?: string; limit?: number; level?: LogEntry["level"] }): {
   entries: LogEntry[];
   nextCursor: string;
@@ -97,7 +143,7 @@ export function readLogs(opts: { cursor?: string; limit?: number; level?: LogEnt
   newErrors: number;
 } {
   const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
-  let filtered = SEED_LOGS;
+  let filtered = LOGS;
   if (opts.level) filtered = filtered.filter((e) => e.level === opts.level);
   let start = 0;
   if (opts.cursor) {

@@ -10,6 +10,7 @@ import path from "node:path";
 import { Client } from "@modelcontextprotocol/client";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { startServer } from "../src/http";
+import { resetStoreForTests } from "../src/state";
 import type { Server } from "node:http";
 
 const TOKEN = "test-token-" + Math.random().toString(36).slice(2);
@@ -68,6 +69,7 @@ function authed(extra: Record<string, string> = {}, body = "") {
 }
 
 beforeAll(async () => {
+  resetStoreForTests();
   PORT = await freePort();
   server = await startServer({ port: PORT, token: TOKEN });
   baseUrl = `http://127.0.0.1:${PORT}/mcp`;
