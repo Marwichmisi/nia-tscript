@@ -2,11 +2,31 @@ mod boot;
 
 use std::net::TcpListener;
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
 use tauri::Manager;
+
+/// Sidecar `pcb-mcp` (#10) : enfant détaché, tué à la fermeture de l'app.
+/// `None` = backend stub interne #9 (binaire absent ou spawn KO).
+static SIDECAR: OnceLock<Arc<Mutex<Option<std::process::Child>>>> =
+    OnceLock::new();
+
+fn sidecar_slot() -> &'static Arc<Mutex<Option<std::process::Child>>> {
+    SIDECAR.get_or_init(|| Arc::new(Mutex::new(None)))
+}
+
+fn store_sidecar(child: std::process::Child) {
+    *sidecar_slot().lock().expect("sidecar slot") = Some(child);
+}
+
+fn kill_sidecar() {
+    if let Some(mut child) = sidecar_slot().lock().expect("sidecar slot").take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
 struct BootState {
@@ -57,9 +77,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(boot_state)
         .on_window_event(|win, event| {
-            // §5.2.6 : à la fermeture, suppression best-effort du lockfile
-            // (token éphémère jamais réutilisé ; le stale-lock couvre les crashs).
+            // §5.2.6 : à la fermeture, tuer le sidecar (#10) puis supprimer
+            // le lockfile best-effort (token éphémère jamais réutilisé ;
+            // le stale-lock couvre les crashs).
             if matches!(event, tauri::WindowEvent::Destroyed) {
+                kill_sidecar();
                 if let Ok(cache) = win.app_handle().path().app_cache_dir() {
                     let _ = std::fs::remove_file(boot::lockfile_path(&cache));
                 }
@@ -89,8 +111,9 @@ pub fn run() {
 /// Séquence setup() (§5.2 findings) :
 /// 1. single-instance déjà enregistré (refocus si 2e lancement).
 /// 2. lockfile existant ? pid vivant + probe OK => s'y attacher.
-/// 3. sinon boot frais : listener 127.0.0.1:0 (pas de race) + token éphémère.
-/// 4. stub interne (#9 ; spawn sidecar activé en #10) + poll readiness.
+/// 3. sinon boot frais : sidecar `pcb-mcp serve --port` (#10, token via env),
+///    retry 3 tentatives avec readiness 10 s chacune.
+/// 4. repli stub interne (#9) si binaire absent ou spawn KO répété.
 /// 5. écriture lockfile 0600 APRÈS readiness. Token jamais loggé.
 fn boot_or_attach(app: &tauri::AppHandle) -> Result<BootState, String> {
     let cache_dir = app
@@ -108,7 +131,57 @@ fn boot_or_attach(app: &tauri::AppHandle) -> Result<BootState, String> {
         }
     }
 
-    // 3. Boot frais : bind atomique (le port final = celui du lockfile).
+    // 3. Boot frais via sidecar (#10) quand le binaire existe.
+    // Binaire présent mais jamais ready après 3 tentatives => erreur dure
+    // (pas de lockfile, pas de repli silencieux : un sidecar cassé ne doit
+    // pas être masqué). Le repli stub #9 n'a lieu que si le binaire est
+    // absent (dev sans `bun build --compile`).
+    if let Some(bin) = boot::find_sidecar_bin() {
+        let mut last_err = String::new();
+        for attempt in 1..=3u32 {
+            let port = boot::pick_free_port()
+                .map_err(|e| format!("port libre indisponible: {e}"))?;
+            let token = boot::generate_token();
+            match boot::spawn_sidecar(&bin, port, &token) {
+                Ok(child) => {
+                    let url = boot::mcp_url(port);
+                    if boot::wait_ready(&url, &token, Duration::from_secs(10)) {
+                        let lock = boot::build_lock(port, token);
+                        boot::write_lockfile(&lock_path, &lock)
+                            .map_err(|e| format!("écriture lockfile: {e}"))?;
+                        store_sidecar(child);
+                        eprintln!(
+                            "[boot] sidecar pcb-mcp prêt sur {url} (tentative {attempt})"
+                        );
+                        return Ok(BootState::from_lock(&lock, true));
+                    }
+                    last_err = format!("sidecar non ready sur {url}");
+                    eprintln!("[boot] {last_err} (tentative {attempt}/3)");
+                    let mut child = child;
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                Err(e) => {
+                    last_err = format!("spawn sidecar KO: {e}");
+                    eprintln!("[boot] {last_err} (tentative {attempt}/3)");
+                }
+            }
+        }
+        return Err(format!(
+            "sidecar pcb-mcp inutilisable après 3 tentatives ({last_err}), pas de lockfile"
+        ));
+    }
+    eprintln!("[boot] binaire pcb-mcp absent, repli stub #9");
+
+    // 4. Stub interne (#9 ; dev sans `bun build --compile`).
+    boot_fresh_stub(&lock_path)
+}
+
+/// Boot frais sur le stub interne : bind atomique 127.0.0.1:0 (le port final
+/// est celui du lockfile, pas de race), token éphémère, readiness pollée
+/// jusqu'à 10 s puis lockfile 0600 APRÈS readiness.
+fn boot_fresh_stub(lock_path: &std::path::Path) -> Result<BootState, String> {
+    // Bind atomique (le port final = celui du lockfile).
     let listener =
         TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("bind 127.0.0.1: {e}"))?;
     let port = listener
@@ -116,12 +189,9 @@ fn boot_or_attach(app: &tauri::AppHandle) -> Result<BootState, String> {
         .map_err(|e| format!("local_addr: {e}"))?
         .port();
     let token = boot::generate_token();
-
-    // 4. Stub interne (#9). Le spawn sidecar `pcb-mcp serve --port` (capability
-    // déjà verrouillée) sera branché ici en #10 quand le binaire existera.
+    // Stub interne (#9) : écoute minimale, readiness stampée au boot complet.
     let ready = Arc::new(AtomicBool::new(false));
     let _server = boot::serve_listener(listener, token.clone(), ready.clone());
-    // Boot complet (file V1 rattachée dès #10) => readiness true.
     ready.store(true, Ordering::SeqCst);
 
     let url = boot::mcp_url(port);

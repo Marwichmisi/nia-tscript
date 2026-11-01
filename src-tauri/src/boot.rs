@@ -232,9 +232,20 @@ fn find_headers_end(buf: &[u8]) -> Option<usize> {
         .map(|i| i + 4)
 }
 
-/// Probe de readiness : connect + requête authentifiée, `true` ssi
-/// HTTP 200 ET body `ready:true`. Timeout total ~3,5 s max.
+/// Probe de readiness : connect + requête authentifiée.
+/// Retourne `true` ssi HTTP 200 ET body exploitable :
+/// - stub interne (#9) : body `ready:true` ;
+/// - sidecar `pcb-mcp` (#10) : réponse MCP valide (le stub ne connaît pas
+///   `tools/list`, le sidecar répond 200 avec la liste des outils).
+/// Timeout total ~3,5 s max.
 pub fn probe_ready(url: &str, token: &str) -> bool {
+    probe_ready_with(url, token, PROBE_INITIALIZE_BODY)
+}
+
+/// Variante avec body explicite.
+/// Le stub #9 ignore le body ; le sidecar #10 exige un JSON-RPC valide
+/// (enveloppe `_meta` moderne ou handshake legacy).
+pub fn probe_ready_with(url: &str, token: &str, body: &[u8]) -> bool {
     let (addr, path) = match parse_mcp_url(url) {
         Some(v) => v,
         None => return false,
@@ -244,11 +255,14 @@ pub fn probe_ready(url: &str, token: &str) -> bool {
         Err(_) => return false,
     };
     let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
-    let req = format!(
-        "POST {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",
-        addr
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
     );
-    if stream.write_all(req.as_bytes()).is_err() {
+    if stream.write_all(head.as_bytes()).is_err() {
+        return false;
+    }
+    if stream.write_all(body).is_err() {
         return false;
     }
     let mut resp = Vec::with_capacity(1024);
@@ -258,7 +272,7 @@ pub fn probe_ready(url: &str, token: &str) -> bool {
             Ok(0) => break,
             Ok(n) => {
                 resp.extend_from_slice(&chunk[..n]);
-                if resp.len() > 16384 {
+                if resp.len() > 65536 {
                     break;
                 }
             }
@@ -267,8 +281,16 @@ pub fn probe_ready(url: &str, token: &str) -> bool {
     }
     let text = String::from_utf8_lossy(&resp);
     let status_ok = text.lines().next().is_some_and(|l| l.contains("200"));
-    status_ok && text.contains(r#""ready":true"#)
+    // Stub #9 : `{"ready":true,…}` ; sidecar #10 : réponse d'`initialize`
+    // contenant `serverInfo` (le stub ne produit jamais cette clé, et le
+    // body `ready:false` ne doit pas passer pour ready).
+    status_ok && (text.contains(r#""ready":true"#) || text.contains(r#""serverInfo""#))
 }
+
+/// Body de probe compatible des deux backends : handshake legacy
+/// (le stub #9 ignore le body, le sidecar #10 le sert en 200 via
+/// le fallback `legacy: 'stateless'`).
+pub const PROBE_INITIALIZE_BODY: &[u8] = br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"nia-boot-probe","version":"0.1.0"}}}"#;
 
 fn parse_mcp_url(url: &str) -> Option<(SocketAddr, String)> {
     let rest = url.strip_prefix("http://")?;
@@ -284,6 +306,97 @@ fn parse_mcp_url(url: &str) -> Option<(SocketAddr, String)> {
     }
     let ip: std::net::IpAddr = "127.0.0.1".parse().ok()?;
     Some((SocketAddr::new(ip, port), path))
+}
+
+// --- Sidecar `pcb-mcp` (#10) -------------------------------------------------
+//
+// Le binaire est produit par `pcb-mcp/scripts/build.mjs`
+// (`bun build --compile`) et déclaré en `externalBin` triple-suffixé.
+// En prod (bundlé), Tauri le place à côté de l'exécutable sous le nom nu
+// `pcb-mcp` ; en dev/test, il est sous `src-tauri/binaries/pcb-mcp-<triple>`.
+
+/// Candidats binaire sidecar : d'abord le répertoire de l'exécutable courant
+/// (prod bundlé : nom nu), puis `src-tauri/binaries/pcb-mcp-*` (dev/test).
+pub fn sidecar_candidate_paths() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for name in ["pcb-mcp", "pcb-mcp.exe"] {
+                out.push(dir.join(name));
+            }
+        }
+    }
+    let manifest_bin = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries");
+    if let Ok(entries) = std::fs::read_dir(&manifest_bin) {
+        let mut names: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("pcb-mcp-"))
+            })
+            .collect();
+        names.sort();
+        out.extend(names);
+    }
+    out
+}
+
+/// Premier candidat existant et non-vide, sinon `None`
+/// (le boot retombe alors sur le stub interne #9).
+pub fn find_sidecar_bin() -> Option<PathBuf> {
+    sidecar_candidate_paths().into_iter().find(|p| {
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() > 0)
+    })
+}
+
+/// Vrai binaire compilé (`bun build --compile` ≈ 100 Mo) vs stub shell
+/// (`scripts/ensure-sidecar-stub.sh`, quelques octets) : heuristique de
+/// taille pour les tests (le stub ne sert aucun MCP).
+pub fn is_real_sidecar_bin(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.len() > 1_000_000)
+}
+
+/// Spawn détaché : `bin serve --port <port>`, token via env (jamais en argv,
+/// jamais loggé), stdout neutralisée, stderr héritée (logs serveur).
+pub fn spawn_sidecar(
+    bin: &Path,
+    port: u16,
+    token: &str,
+) -> io::Result<std::process::Child> {
+    if port == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "port 0 interdit au sidecar (port explicite requis)",
+        ));
+    }
+    if token.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "token bearer requis",
+        ));
+    }
+    std::process::Command::new(bin)
+        .arg("serve")
+        .arg("--port")
+        .arg(port.to_string())
+        .env("PCB_MCP_TOKEN", token)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+}
+
+/// Attente readiness avec deadline (poll `probe_ready` toutes les 100 ms).
+pub fn wait_ready(url: &str, token: &str, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if probe_ready(url, token) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    probe_ready(url, token)
 }
 
 #[cfg(test)]
@@ -438,5 +551,98 @@ mod tests {
         ready.store(true, Ordering::SeqCst);
         assert!(probe_ready(&url, &token));
         assert!(!probe_ready(&url, "mauvais-token"));
+    }
+
+    #[test]
+    fn spawn_rejects_invalid_args() {
+        let bin = PathBuf::from("/inexistant/pcb-mcp");
+        assert!(super::spawn_sidecar(&bin, 0, "tok").is_err());
+        assert!(super::spawn_sidecar(&bin, 4123, "").is_err());
+    }
+
+    #[test]
+    fn wait_ready_false_on_closed_port() {
+        let port = super::pick_free_port().expect("port libre");
+        let url = super::mcp_url(port);
+        assert!(
+            !super::wait_ready(&url, "tok", Duration::from_millis(300)),
+            "port fermé => pas ready"
+        );
+    }
+
+    /// E2E sidecar réel (#10) : spawn + readiness + guards HTTP.
+    /// Skip si le binaire compilé est absent (clone frais sans `bun build`).
+    #[test]
+    fn sidecar_spawn_probe_and_guards() {
+        let Some(bin) = super::find_sidecar_bin() else {
+            eprintln!("skip: aucun binaire sidecar (lancer pcb-mcp/scripts/build.mjs)");
+            return;
+        };
+        if !super::is_real_sidecar_bin(&bin) {
+            eprintln!("skip: sidecar stub shell (pas le binaire compilé)");
+            return;
+        }
+        let port = super::pick_free_port().expect("port libre");
+        let token = super::generate_token();
+        let url = super::mcp_url(port);
+        let mut child = super::spawn_sidecar(&bin, port, &token)
+            .expect("spawn sidecar");
+        let ready = super::wait_ready(&url, &token, Duration::from_secs(15));
+        // Nettoyage même en échec (pas d'orphelin dans la suite de tests).
+        let kill = |c: &mut std::process::Child| {
+            let _ = c.kill();
+            let _ = c.wait();
+        };
+        if !ready {
+            kill(&mut child);
+            panic!("sidecar non ready en 15 s sur {url}");
+        }
+        // Distinguisher sidecar vs stub #9 : GET /mcp => 405 côté sidecar.
+        let (status, _) = raw_http(&url, "GET", None, &token);
+        assert!(
+            status.contains("405"),
+            "sidecar GET /mcp doit être 405, got: {status}"
+        );
+        // Sans bearer => 401.
+        let (status, _) = raw_http(&url, "POST", None, "mauvais-token");
+        assert!(
+            status.contains("401"),
+            "sidecar sans bearer doit être 401, got: {status}"
+        );
+        kill(&mut child);
+    }
+
+    /// Requête HTTP brute minimale (statut + body) contre une URL `mcp_url`.
+    fn raw_http(
+        url: &str,
+        method: &str,
+        body: Option<&[u8]>,
+        token: &str,
+    ) -> (String, String) {
+        use std::io::{Read, Write};
+        let rest = url.strip_prefix("http://").expect("http url");
+        let (host_port, _) = rest.split_once('/').expect("host/path");
+        let mut stream = std::net::TcpStream::connect(host_port)
+            .expect("connect sidecar");
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let body = body.unwrap_or(super::PROBE_INITIALIZE_BODY);
+        let req = format!(
+            "{method} /mcp HTTP/1.1\r\nHost: {host_port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(req.as_bytes()).expect("write head");
+        stream.write_all(body).expect("write body");
+        let mut resp = Vec::new();
+        let mut chunk = [0u8; 2048];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => resp.extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+        let text = String::from_utf8_lossy(&resp).into_owned();
+        let status = text.lines().next().unwrap_or("").to_string();
+        (status, text)
     }
 }
