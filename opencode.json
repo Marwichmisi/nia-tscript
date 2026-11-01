@@ -1,0 +1,11 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // Bridge stdio vers le studio (ticket #11) : le lockfile ~/.cache/niatscircuit/mcp.json
+  // est écrit par l'app Tauri au boot ; app fermée => erreur -32000 explicite.
+  "mcp": {
+    "niatscircuit": {
+      "type": "local",
+      "command": ["node", "bridge/bridge.mjs"]
+    }
+  }
+}

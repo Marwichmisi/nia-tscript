@@ -1,0 +1,16 @@
+{
+  "name": "@nia-tscircuit/mcp-bridge",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Thin bridge stdio ↔ HTTP MCP local (ticket #11) — stdin/stdout MCP pur, logs stderr préfixés, jamais de headless.",
+  "bin": {
+    "nia-tscircuit-mcp-bridge": "./bridge.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "license": "MIT"
+}
