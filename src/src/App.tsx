@@ -180,74 +180,61 @@ export default function App() {
     void refreshProjects();
   }, [refreshProjects]);
 
-  async function handleOpen(p: string) {
+  async function withProjBusy<T>(fn: () => Promise<T>, withError = true): Promise<T | void> {
     setProjBusy(true);
-    setProjError(null);
+    if (withError) setProjError(null);
     try {
+      return await fn();
+    } catch (e) {
+      if (withError) setProjError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setProjBusy(false);
+    }
+  }
+
+  async function handleOpen(p: string) {
+    await withProjBusy(async () => {
       const opened = await openProj(p);
       setProjectPath(opened);
       const main = await readProjectMain(opened);
       setProjectCode(main.code);
       await refreshProjects();
-    } catch (e) {
-      setProjError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setProjBusy(false);
-    }
+    });
   }
 
   async function handleCreate(p: string, template: "vide" | "demo") {
-    setProjBusy(true);
-    setProjError(null);
-    try {
+    await withProjBusy(async () => {
       const created = await createProj(p, template);
       setProjectPath(created);
       const main = await readProjectMain(created);
       setProjectCode(main.code);
       await refreshProjects();
-    } catch (e) {
-      setProjError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setProjBusy(false);
-    }
+    });
   }
 
   async function handleClose() {
-    setProjBusy(true);
-    try {
+    await withProjBusy(async () => {
       await closeProj();
       setProjectPath(null);
       await refreshProjects();
-    } finally {
-      setProjBusy(false);
-    }
+    }, false);
   }
 
   async function handleForget(p: string) {
-    setProjBusy(true);
-    try {
+    await withProjBusy(async () => {
       await forgetProj(p);
       await refreshProjects();
-    } catch (e) {
-      setProjError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setProjBusy(false);
-    }
+    });
   }
 
   async function handleDelete(p: string) {
     if (!window.confirm(`Supprimer le dossier projet ?\n${p}`)) return;
-    setProjBusy(true);
-    try {
+    await withProjBusy(async () => {
       await deleteProj(p);
       const cur = await currentProject().catch(() => null);
       setProjectPath(cur);
       await refreshProjects();
-    } catch (e) {
-      setProjError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setProjBusy(false);
-    }
+    });
   }
 
   useEffect(() => {

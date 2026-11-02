@@ -136,54 +136,23 @@ fn get_preview_dir(
 // chemin sans AppHandle). Le Projet ouvert vit dans le lockfile
 // `projectPath` + `BootState.project_path`.
 
-fn registry_file() -> Result<std::path::PathBuf, String> {
-    let cache = boot::base_cache_dir().ok_or("cache_dir indisponible")?;
-    Ok(boot::registry_path(&cache))
-}
-
 fn load_registry() -> project::Registry {
-    let Ok(file) = registry_file() else {
+    let Ok(cache) = boot::base_cache_dir().ok_or("cache_dir indisponible") else {
         return project::Registry::default();
     };
-    let Ok(text) = std::fs::read_to_string(&file) else {
-        return project::Registry::default();
-    };
-    project::parse_registry(&text).unwrap_or_default()
+    project::load_registry_file(&cache)
 }
 
 fn save_registry(reg: &project::Registry) -> Result<(), String> {
-    let file = registry_file()?;
-    if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("création registre : {e}"))?;
-    }
-    let text = project::serialize_registry(reg)?;
-    std::fs::write(&file, text).map_err(|e| format!("écriture registre : {e}"))?;
-    Ok(())
+    let cache = boot::base_cache_dir().ok_or("cache_dir indisponible")?;
+    project::save_registry_file(&cache, reg)
 }
 
 fn write_lock_project(project: Option<&str>) {
     let Some(cache) = boot::base_cache_dir() else {
         return;
     };
-    let path = boot::lockfile_path(&cache);
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return;
-    };
-    let Ok(mut data) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return;
-    };
-    match project {
-        Some(p) => data["projectPath"] = serde_json::Value::String(p.to_string()),
-        None => {
-            if let Some(obj) = data.as_object_mut() {
-                obj.remove("projectPath");
-            }
-        }
-    }
-    let Ok(out) = serde_json::to_string_pretty(&data) else {
-        return;
-    };
-    let _ = std::fs::write(&path, out);
+    project::write_lock_project(&cache, project);
 }
 
 fn set_current(state: &tauri::State<'_, Arc<Mutex<BootState>>>, project: Option<String>) {

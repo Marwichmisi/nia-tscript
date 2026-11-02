@@ -170,6 +170,56 @@ pub fn serialize_registry(reg: &Registry) -> Result<String, String> {
     serde_json::to_string_pretty(reg).map_err(|e| format!("sérialisation registre : {e}"))
 }
 
+// --- Persistance partagée Rust ↔ sidecar ------------------------------------
+// Le Registre + `projectPath` vivent sous `base cache/niatscircuit/` (même
+// raison que le lockfile bug #25 : le sidecar Node calcule le même chemin
+// sans AppHandle). Regroupés ici pour éviter la dispersion (review).
+
+/// `base cache/niatscircuit/projects.json`.
+pub fn registry_file(cache_dir: &Path) -> PathBuf {
+    cache_dir.join(crate::boot::REGISTRY_REL)
+}
+
+/// Charge le Registre depuis le cache de base (défaut vide).
+pub fn load_registry_file(cache_dir: &Path) -> Registry {
+    let text = std::fs::read_to_string(registry_file(cache_dir)).unwrap_or_default();
+    parse_registry(&text).unwrap_or_default()
+}
+
+/// Sauvegarde le Registre (crée les parents).
+pub fn save_registry_file(cache_dir: &Path, reg: &Registry) -> Result<(), String> {
+    let file = registry_file(cache_dir);
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("création registre : {e}"))?;
+    }
+    let text = serialize_registry(reg)?;
+    std::fs::write(&file, text).map_err(|e| format!("écriture registre : {e}"))?;
+    Ok(())
+}
+
+/// Met à jour `projectPath` du lockfile best-effort (partage Rust ↔ sidecar).
+pub fn write_lock_project(cache_dir: &Path, project: Option<&str>) {
+    let path = crate::boot::lockfile_path(cache_dir);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(mut data) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    match project {
+        Some(p) => data["projectPath"] = serde_json::Value::String(p.to_string()),
+        None => {
+            if let Some(obj) = data.as_object_mut() {
+                obj.remove("projectPath");
+            }
+        }
+    }
+    let Ok(out) = serde_json::to_string_pretty(&data) else {
+        return;
+    };
+    let _ = std::fs::write(&path, out);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
