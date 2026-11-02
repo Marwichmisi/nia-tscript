@@ -6,6 +6,7 @@ import { z } from "zod";
 import { emptyStats } from "./board.js";
 import { runDomainChecks, runPlacementGate, type CheckDomain } from "./checks.js";
 import { compileTsx } from "./compile.js";
+import { applyBatch, BATCH_MAX_OPS, type BatchOp } from "./batch.js";
 import {
   applyMove,
   applyReassignNet,
@@ -25,9 +26,11 @@ import {
   getCode,
   getHierarchy,
   readLogs,
+  restoreStore,
   setCode,
   setDrcViolations,
   setLastCompile,
+  snapshotStore,
 } from "./state.js";
 
 export const SERVER_NAME = "pcb-mcp";
@@ -214,6 +217,74 @@ const PreviewScreenshotOutput = z.object({
   message: z.string().nullable(),
   errors: z.number(),
   warnings: z.number(),
+});
+
+const BatchOpSchema = z.union([
+  z.object({
+    kind: z.literal("patch"),
+    anchor: z.string().min(1).describe("Extrait exact du TSX, exactement une occurrence"),
+    replacement: z.string().describe("Texte de remplacement de l'ancre"),
+  }),
+  z.object({
+    kind: z.literal("move"),
+    refdes: z.string().min(1).describe("Composant visé (ex R1)"),
+    x: z.number().describe("move : pcbX en mm"),
+    y: z.number().describe("move : pcbY en mm"),
+  }),
+  z.object({
+    kind: z.literal("rotate"),
+    refdes: z.string().min(1).describe("Composant visé (ex R1)"),
+    degrees: z.number().describe("rotate : pcbRotation en degrés"),
+  }),
+  z.object({
+    kind: z.literal("swap_package"),
+    refdes: z.string().min(1).describe("Composant visé (ex R1)"),
+    footprint: z.string().min(1).describe("swap_package : empreinte cible (ex 0603)"),
+  }),
+  z.object({
+    kind: z.literal("reassign_net"),
+    refdes: z.string().min(1).describe("Composant visé (ex R1)"),
+    pin: z.string().min(1).describe("reassign_net : pin visée (ex pin1)"),
+    net: z.string().min(1).describe("reassign_net : net cible (ex GND ou net.GND)"),
+  }),
+]);
+
+const BatchExecuteInput = z.object({
+  session_id: z.string().optional().describe("Session mono-board (défaut: default)"),
+  operations: z
+    .array(BatchOpSchema)
+    .describe(
+      `Lot atomique patch+live (1..${BATCH_MAX_OPS}) : une seule approbation couvre l'itération complète, rollback si un op échoue`,
+    ),
+  disableCdnLoading: z
+    .boolean()
+    .optional()
+    .describe(" true = offline strict (bandeau si dégradation réseau)"),
+});
+
+const BatchExecuteOutput = z.object({
+  sessionId: z.string(),
+  applied: z.boolean(),
+  ready: z.boolean(),
+  failedOpIndex: z.number().nullable(),
+  rolledBack: z.boolean(),
+  stats: z.object({
+    total: z.number(),
+    components: z.number(),
+    traces: z.number(),
+    nets: z.number(),
+    byType: z.record(z.string(), z.number()),
+  }),
+  diagnostics: z.array(
+    z.object({ severity: z.string(), message: z.string(), source: z.string() }),
+  ),
+  mode: z.string(),
+  banner: z.string().nullable(),
+  errors: z.number(),
+  warnings: z.number(),
+  circuitJsonLength: z.number(),
+  circuitJson: z.array(z.any()),
+  code: z.string().nullable(),
 });
 
 export function buildFactory() {
@@ -766,6 +837,149 @@ export function buildFactory() {
           content: [{ type: "text", text: JSON.stringify(output) }],
           structuredContent: output,
         };
+      },
+    );
+
+    server.registerTool(
+      "batch_execute",
+      {
+        title: "Lot atomique + une approbation",
+        description:
+          "Applique un lot mixte patch+live en une seule approbation : toutes les ops en mémoire puis une seule compile. Échec (op invalide ou compile en erreur) → rollback complet fichier+live, état inchangé. Une itération = un seul tools/call.",
+        inputSchema: BatchExecuteInput,
+        outputSchema: BatchExecuteOutput,
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+      },
+      async ({ session_id, operations, disableCdnLoading }) => {
+        return enqueue(async () => {
+          const sessionId = session_id ?? "default";
+          const ops = (operations ?? []) as BatchOp[];
+          if (!Array.isArray(ops) || ops.length === 0) {
+            const ready = getBoardState(sessionId).ready;
+            const output = {
+              sessionId,
+              applied: false as const,
+              ready,
+              failedOpIndex: null as number | null,
+              rolledBack: false,
+              stats: emptyStats(),
+              diagnostics: [
+                {
+                  severity: "error",
+                  message: "lot vide : fournissez au moins une opération",
+                  source: "batch_execute",
+                },
+              ],
+              mode: "refuse",
+              banner: null as string | null,
+              errors: 1,
+              warnings: 0,
+              circuitJsonLength: 0,
+              circuitJson: [] as unknown[],
+              code: null as string | null,
+            };
+            appendLog("error", "compile", "batch_execute rejeté : lot vide");
+            return {
+              content: [{ type: "text", text: JSON.stringify(output) }],
+              structuredContent: output,
+            };
+          }
+          const snap = snapshotStore();
+          const batched = applyBatch(snap.code, ops);
+          if (!batched.ok) {
+            restoreStore(snap);
+            const ready = getBoardState(sessionId).ready;
+            const output = {
+              sessionId,
+              applied: false as const,
+              ready,
+              failedOpIndex: batched.failedIndex as number | null,
+              rolledBack: true,
+              stats: emptyStats(),
+              diagnostics: [
+                { severity: "error", message: batched.message, source: "batch_execute" },
+              ],
+              mode: "echec",
+              banner: null as string | null,
+              errors: 1,
+              warnings: 0,
+              circuitJsonLength: 0,
+              circuitJson: [] as unknown[],
+              code: snap.code,
+            };
+            appendLog(
+              "error",
+              "compile",
+              `batch_execute rollback : op ${batched.failedIndex} — ${batched.message}`,
+            );
+            return {
+              content: [{ type: "text", text: JSON.stringify(output) }],
+              structuredContent: output,
+            };
+          }
+          setCode(batched.code);
+          const compiled = await compileTsx(batched.code, { disableCdnLoading });
+          if (compiled.errors !== 0) {
+            restoreStore(snap);
+            const ready = getBoardState(sessionId).ready;
+            const output = {
+              sessionId,
+              applied: false as const,
+              ready,
+              failedOpIndex: null as number | null,
+              rolledBack: true,
+              stats: emptyStats(),
+              diagnostics: compiled.diagnostics,
+              mode: "echec",
+              banner: compiled.banner,
+              errors: compiled.errors,
+              warnings: compiled.warnings,
+              circuitJsonLength: 0,
+              circuitJson: [] as unknown[],
+              code: snap.code,
+            };
+            appendLog(
+              "error",
+              "compile",
+              `batch_execute rollback : compile en erreur — ${compiled.diagnostics[0]?.message ?? "inconnu"}`,
+            );
+            return {
+              content: [{ type: "text", text: JSON.stringify(output) }],
+              structuredContent: output,
+            };
+          }
+          setLastCompile({ status: "ok", errors: 0, warnings: compiled.warnings });
+          appendLog(
+            "info",
+            "compile",
+            `batch_execute ok : ${ops.length} ops, ${compiled.stats.total} éléments, 0 erreur`,
+          );
+          const output = {
+            sessionId,
+            applied: true as const,
+            ready: true,
+            failedOpIndex: null as number | null,
+            rolledBack: false,
+            stats: compiled.stats,
+            diagnostics: compiled.diagnostics,
+            mode: compiled.mode,
+            banner: compiled.banner,
+            errors: 0,
+            warnings: compiled.warnings,
+            circuitJsonLength: compiled.circuitJson.length,
+            circuitJson: compiled.circuitJson,
+            code: batched.code,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        });
       },
     );
 

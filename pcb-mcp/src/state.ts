@@ -127,6 +127,26 @@ export function setDrcViolations(n: number): void {
   lastDrcViolations = n;
 }
 
+/** Snapshot atomique pour `batch_execute` (#16) : code + compile + drc. */
+export function snapshotStore(): {
+  code: string;
+  compile: BoardState["compile"] | null;
+  drc: number;
+} {
+  return { code: currentCode, compile: lastCompile, drc: lastDrcViolations };
+}
+
+/** Restaure un snapshot (rollback fichier + live, état inchangé). */
+export function restoreStore(snap: {
+  code: string;
+  compile: BoardState["compile"] | null;
+  drc: number;
+}): void {
+  currentCode = snap.code;
+  lastCompile = snap.compile;
+  lastDrcViolations = snap.drc;
+}
+
 export function appendLog(
   level: LogEntry["level"],
   source: LogEntry["source"],
