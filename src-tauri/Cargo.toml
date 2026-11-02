@@ -1,6 +1,6 @@
 [package]
 name = "nia-tscircuit-studio"
-version = "0.1.0"
+version = "0.1.1"
 description = "NIATSCIRCUIT Studio — Tauri boot + lockfile single-flight (#9)"
 authors = ["nia-tscircuit"]
 edition = "2021"
