@@ -1097,7 +1097,7 @@ export function buildFactory() {
         if (src !== "jlcpcb" && src !== "lcsc") {
           const message =
             `source "${source}" non supportée au MVP (sourcing JLCPCB-first, décision carte #6) : ` +
-            `multi-sourcing DigiKey/Mouser différé V2 — utilisez source=jlcpcb (ou alias lcsc)`;
+            `multi-sourcing (DigiKey/Mouser/Farnell) différé V2 — utilisez source=jlcpcb (ou alias lcsc)`;
           appendLog("error", "export", `search_parts source refusée : ${source}`);
           const output = {
             sessionId,
@@ -1146,7 +1146,7 @@ export function buildFactory() {
           tsciSearch: found.tsciSearch,
           results: found.results,
           banner: null as string | null,
-          message: null as string | null,
+          message: found.message,
           errors: 0,
           warnings: 0,
         };

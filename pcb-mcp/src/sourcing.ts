@@ -42,6 +42,8 @@ export interface SearchPartsOk {
   query: string;
   tsciSearch: string;
   results: PartResult[];
+  /** Guidance quand results est vide (index partiel), sinon null. */
+  message: string | null;
 }
 
 export interface SearchPartsErr {
@@ -157,6 +159,75 @@ interface JlcComponent {
   stock?: unknown;
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Normalise un package pour comparaison (sot-23 ≡ SOT23). */
+function normPackage(s: string): string {
+  return s.toLowerCase().replace(/[-_ ]/g, "");
+}
+
+const PACKAGE_HINT_RE =
+  /\b(0201|0402|0603|0805|1206|1210|2010|2512|sot-?23|sot-?223|soic-?8|soic-?16|qfn-?\d*|lqfp-?\d*|tssop-?\d*|sod-?123|sod-?323|sod-?723)\b/i;
+
+/**
+ * Indices de pertinence extraits de la query : package (0402, SOT-23…),
+ * token valeur (10k, 100nF… ; LCSC direct exclu) + famille devinée
+ * (resistor/capacitor/inductor/diode d'après l'unité).
+ */
+export function parseQueryHints(query: string): {
+  packageHint: string | null;
+  valueToken: string | null;
+  kindHint: string | null;
+} {
+  const tokens = query.split(/[\s,;]+/).filter(Boolean);
+  let packageHint: string | null = null;
+  let valueToken: string | null = null;
+  for (const t of tokens) {
+    if (!packageHint && PACKAGE_HINT_RE.test(t)) {
+      packageHint = normPackage(t.match(PACKAGE_HINT_RE)![0]!);
+      continue;
+    }
+    if (!valueToken && !/^c\d+$/i.test(t)) valueToken = t.toLowerCase();
+  }
+  let kindHint: string | null = null;
+  if (valueToken) {
+    if (/^\d+(\.\d+)?(p|n|u)f$/i.test(valueToken)) kindHint = "capacitor";
+    else if (/^\d+(\.\d+)?(r|k|m|ohm)/i.test(valueToken)) kindHint = "resistor";
+    else if (/^\d+(\.\d+)?(nh|uh|mh)$/i.test(valueToken)) kindHint = "inductor";
+    else if (/led/i.test(valueToken)) kindHint = "led";
+  }
+  return { packageHint, valueToken, kindHint };
+}
+
+/** Score de pertinence : package exact > famille > valeur > stock. */
+export function scorePart(
+  part: { package: string; description: string; stock: number | null },
+  hints: { packageHint: string | null; valueToken: string | null; kindHint: string | null },
+): number {
+  let score = 0;
+  if (hints.packageHint) {
+    const p = normPackage(part.package);
+    if (p === hints.packageHint) score += 100;
+    else if (p.includes(hints.packageHint) || hints.packageHint.includes(p)) score += 40;
+  }
+  const desc = part.description.toLowerCase();
+  if (hints.kindHint) {
+    if (hints.kindHint === "led") {
+      if (desc.includes("led")) score += 50;
+    } else if (desc.includes(hints.kindHint) || desc.includes(hints.kindHint.slice(0, 4))) {
+      score += 50;
+    }
+  }
+  if (hints.valueToken) {
+    const re = new RegExp(`(^|[^a-z0-9])${escapeRegExp(hints.valueToken)}(?![a-z])`);
+    if (re.test(desc) || re.test(part.package.toLowerCase())) score += 30;
+  }
+  if (typeof part.stock === "number" && part.stock > 0) score += 10;
+  return score;
+}
+
 /** Recherche JLCPCB-first (même source que `tsci search --jlcpcb`). */
 export async function searchParts(
   query: string,
@@ -188,15 +259,48 @@ export async function searchParts(
     const message = e instanceof Error ? e.message : String(e);
     return { ok: false, query: q, tsciSearch, message: `recherche JLCPCB impossible : ${message.slice(0, 200)} — réessayez en ligne ou via ${tsciSearch}`, banner: null };
   }
+  // Pertinence : l'index générique rend des résultats flous (mauvais package
+  // en premier, intrus). On ranke avant de tronquer à `limit`.
+  const hints = parseQueryHints(q);
+  const ranked = [...components]
+    .map((c, i) => {
+      const pkg = typeof c.package === "string" ? c.package : "";
+      const description = typeof c.description === "string" ? c.description : "";
+      const stock = typeof c.stock === "number" && Number.isFinite(c.stock) ? c.stock : null;
+      return {
+        c,
+        i,
+        score: scorePart({ package: pkg, description, stock }, hints),
+        stockRank: stock ?? -1,
+      };
+    })
+    .sort((a, b) => b.score - a.score || b.stockRank - a.stockRank || a.i - b.i)
+    .map((r) => r.c);
   const results: PartResult[] = [];
-  for (const c of components.slice(0, limit)) {
+  for (const c of ranked.slice(0, limit)) {
     const lcscNum = Number(c.lcsc);
     if (!Number.isFinite(lcscNum) || lcscNum <= 0) continue;
     const lcsc = `C${Math.trunc(lcscNum)}`;
     const mfr = typeof c.mfr === "string" ? c.mfr : "";
     const pkg = typeof c.package === "string" ? c.package : "";
     const description = typeof c.description === "string" ? c.description : "";
-    const stock = typeof c.stock === "number" && Number.isFinite(c.stock) ? c.stock : null;
+    let stock = typeof c.stock === "number" && Number.isFinite(c.stock) ? c.stock : null;
+    // Stock parfois null sur /api/search : enrichi via components/list.json.
+    if (stock === null) {
+      try {
+        const sr = await doFetch(`${JLCSEARCH_BASE}/components/list.json?search=${lcsc}`);
+        if (sr.ok) {
+          const sb = (await sr.json()) as { components?: JlcComponent[] };
+          const match = (Array.isArray(sb.components) ? sb.components : []).find(
+            (x) => Number(x.lcsc) === lcscNum,
+          );
+          const s = match?.stock;
+          if (typeof s === "number" && Number.isFinite(s)) stock = s;
+        }
+      } catch {
+        // Best-effort : stock reste null, le résultat reste utilisable.
+      }
+    }
     // Empreinte : footprinter_strings d'abord (cuivre IoU ≥ 95 %), fallback package.
     let footprinterString: string | null = null;
     try {
@@ -226,5 +330,16 @@ export async function searchParts(
       tsciImport: tsciImportCmd(lcsc),
     });
   }
-  return { ok: true, query: q, tsciSearch, results };
+  if (results.length === 0) {
+    return {
+      ok: true,
+      query: q,
+      tsciSearch,
+      results,
+      message:
+        `aucun résultat JLCPCB pour "${q}" (l'index générique ne couvre pas tout, ex certains MCU) : ` +
+        `précisez valeur + package (ex 10k 0402) ou une réf LCSC directe (ex C21190), ou ${tsciSearch}`,
+    };
+  }
+  return { ok: true, query: q, tsciSearch, results, message: null };
 }

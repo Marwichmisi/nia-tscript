@@ -78,12 +78,12 @@ const STUB_FP = {
   },
 };
 
-function stubFetch() {
+function stubFetch(searchBody: unknown = STUB_SEARCH) {
   const real = globalThis.fetch;
   globalThis.fetch = (async (url: unknown, init?: unknown) => {
     const u = String(url);
     if (u.startsWith("https://jlcsearch.tscircuit.com/api/search")) {
-      return { ok: true, status: 200, json: async () => STUB_SEARCH } as Response;
+      return { ok: true, status: 200, json: async () => searchBody } as Response;
     }
     if (u.startsWith("https://jlcsearch.tscircuit.com/api/footprinter_strings/")) {
       return { ok: true, status: 200, json: async () => STUB_FP } as Response;
@@ -150,6 +150,18 @@ describe("S9-A MCP — search_parts JLCPCB-first", () => {
       expect(out.results[0]!.footprinterString).toBe("res_p1.51mm_pw0.81mm_ph0.86mm_p1.505mm");
       expect(out.results[0]!.tsxSnippet).toMatch(/footprint="/);
       expect(out.results[0]!.tsciImport).toBe('tsci import "C21190" --jlcpcb');
+    } finally {
+      restore();
+    }
+  });
+
+  test("0 résultat (ex RP2040) → ok + guidance, rien d'inventé", async () => {
+    const restore = stubFetch({ components: [] });
+    try {
+      const out = await callSearch({ query: "RP2040" });
+      expect(out.errors).toBe(0);
+      expect(out.results).toEqual([]);
+      expect(out.message).toMatch(/aucun résultat/);
     } finally {
       restore();
     }

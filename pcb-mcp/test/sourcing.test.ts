@@ -3,7 +3,7 @@
 // (GET /api/search?q=, GET /api/footprinter_strings/{lcsc}), DSL footprinter
 // local @tscircuit/footprinter 0.0.450. Jamais de recalcul par le code.
 import { describe, test, expect } from "bun:test";
-import { searchParts, generateFootprintDsl, resolveFootprint, TSCI_SEARCH_DOC, TSCI_IMPORT_DOC } from "../src/sourcing";
+import { searchParts, generateFootprintDsl, resolveFootprint, parseQueryHints, scorePart, TSCI_SEARCH_DOC, TSCI_IMPORT_DOC } from "../src/sourcing";
 
 function mockFetch(routes: Record<string, { status: number; body: unknown }>) {
   return async (url: unknown) => {
@@ -132,6 +132,94 @@ describe("S9-A — sourcing.searchParts pur", () => {
     expect(out.footprintSource).toBe("fallback-package");
     const gen = generateFootprintDsl(out.footprint);
     expect(gen.ok).toBe(true);
+  });
+
+  test("parseQueryHints 10k 0402 → package + valeur + famille", () => {
+    expect(parseQueryHints("10k 0402")).toEqual({ packageHint: "0402", valueToken: "10k", kindHint: "resistor" });
+    expect(parseQueryHints("100nF 0603")).toEqual({ packageHint: "0603", valueToken: "100nf", kindHint: "capacitor" });
+    expect(parseQueryHints("C21190")).toEqual({ packageHint: null, valueToken: null, kindHint: null });
+  });
+
+  test("10k 0402 → le 0402 ranke avant le 0603", async () => {
+    const fetchFn = mockFetch({
+      "https://jlcsearch.tscircuit.com/api/search": {
+        status: 200,
+        body: {
+          components: [
+            { lcsc: 21189, mfr: "0603WAF0000T5E", package: "0603", description: "0Ω 0603 Chip Resistor", stock: 20880653 },
+            { lcsc: 25077, mfr: "0402WGF100JTCE", package: "0402", description: "10Ω 0402 Chip Resistor", stock: 3178459 },
+          ],
+        },
+      },
+      "https://jlcsearch.tscircuit.com/api/footprinter_strings/": {
+        status: 200,
+        body: { component_footprinter_details: { lcsc: 0, footprinter_string: null } },
+      },
+    }) as unknown as typeof fetch;
+    const res = await searchParts("10k 0402", { fetchFn, limit: 5 });
+    expect(res.ok).toBe(true);
+    if (!res.ok) throw new Error("attendu ok");
+    expect(res.results.length).toBe(2);
+    expect(res.results[0]!.package).toBe("0402");
+  });
+
+  test("SOT-23 intrus → démote derrière le 0603 pour 100nF 0603", async () => {
+    const fetchFn = mockFetch({
+      "https://jlcsearch.tscircuit.com/api/search": {
+        status: 200,
+        body: {
+          components: [
+            { lcsc: 502564, mfr: "SM712", package: "SOT-23", description: "TVS diode", stock: 136454 },
+            { lcsc: 999001, mfr: "C0603C104K8RAC", package: "0603", description: "100nF 0603 MLCC", stock: 5000 },
+          ],
+        },
+      },
+      "https://jlcsearch.tscircuit.com/api/footprinter_strings/": {
+        status: 200,
+        body: { component_footprinter_details: { lcsc: 0, footprinter_string: null } },
+      },
+    }) as unknown as typeof fetch;
+    const res = await searchParts("100nF 0603", { fetchFn, limit: 5 });
+    expect(res.ok).toBe(true);
+    if (!res.ok) throw new Error("attendu ok");
+    expect(res.results[0]!.package).toBe("0603");
+    expect(res.results[0]!.footprint).toBe("0603");
+  });
+
+  test("stock null → enrichi via components/list.json", async () => {
+    const fetchFn = mockFetch({
+      "https://jlcsearch.tscircuit.com/api/search": {
+        status: 200,
+        body: {
+          components: [
+            { lcsc: 21190, mfr: "0603WAF1001T5E", package: "0603", description: "1kΩ 0603", stock: null },
+          ],
+        },
+      },
+      "https://jlcsearch.tscircuit.com/components/list.json": {
+        status: 200,
+        body: { components: [{ lcsc: 21190, stock: 31312558 }] },
+      },
+      "https://jlcsearch.tscircuit.com/api/footprinter_strings/": {
+        status: 200,
+        body: { component_footprinter_details: { lcsc: 21190, footprinter_string: null } },
+      },
+    }) as unknown as typeof fetch;
+    const res = await searchParts("C21190", { fetchFn });
+    expect(res.ok).toBe(true);
+    if (!res.ok) throw new Error("attendu ok");
+    expect(res.results[0]!.stock).toBe(31312558);
+  });
+
+  test("0 résultat → ok + guidance, rien d'inventé", async () => {
+    const fetchFn = mockFetch({
+      "https://jlcsearch.tscircuit.com/api/search": { status: 200, body: { components: [] } },
+    }) as unknown as typeof fetch;
+    const res = await searchParts("RP2040", { fetchFn });
+    expect(res.ok).toBe(true);
+    if (!res.ok) throw new Error("attendu ok");
+    expect(res.results).toEqual([]);
+    expect(res.message).toMatch(/aucun résultat/);
   });
 
   test("doc API exacte tsci présente (search + import --jlcpcb)", () => {
