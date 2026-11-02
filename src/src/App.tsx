@@ -3,11 +3,30 @@ import { SchematicViewer } from "@tscircuit/schematic-viewer";
 import { PCBViewer } from "@tscircuit/pcb-viewer";
 import { CadViewer } from "@tscircuit/3d-viewer";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  Camera,
+  CircuitBoard,
+  PanelBottom,
+  RotateCw,
+  TriangleAlert,
+  WifiOff,
+} from "lucide-react";
 import { BOARD_CODE } from "./lib/board";
 import { computeStats } from "./lib/board";
 import { compileBoard, type CompileMode } from "./lib/compile";
 import { captureScreenshot, type PreviewSource } from "./lib/screenshot";
 import { ViewerErrorBoundary } from "./components/ErrorBoundary";
+import { Terminal, type Shot, type TermTab } from "./components/Terminal";
+import { Button } from "./components/ui/button";
+import { Badge } from "./components/ui/badge";
+import { Tabs, TabsList, TabsTrigger } from "./components/ui/tabs";
+import { Separator } from "./components/ui/separator";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "./components/ui/tooltip";
 
 type Tab = "schema" | "pcb" | "3d";
 
@@ -23,24 +42,37 @@ const TAB_LABEL: Record<Tab, string> = {
   "3d": "3D",
 };
 
+const TERM_TABS: TermTab[] = ["console", "state", "tsx", "shot"];
+
 function initialTab(): Tab {
   const t = new URLSearchParams(window.location.search).get("tab");
   if (t === "pcb" || t === "3d" || t === "schema") return t;
-  // Compat prototype : ?view=viewers → onglet schéma par défaut.
   return "schema";
 }
 
-interface Shot {
-  dataUrl: string;
-  bytes: number;
-  backend: string;
-  width: number;
-  height: number;
-  previewUrl: string | null;
+function initialTermTab(): TermTab {
+  const t = new URLSearchParams(window.location.search).get("term");
+  if (t && (TERM_TABS as string[]).includes(t)) return t as TermTab;
+  return "console";
+}
+
+function initialHeight(): number {
+  const raw = window.localStorage.getItem("nia.term.height");
+  if (raw === null) return 232;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 232;
+  return Math.min(560, Math.max(120, Math.round(n)));
+}
+
+function initialCollapsed(): boolean {
+  return window.localStorage.getItem("nia.term.collapsed") === "1";
 }
 
 export default function App() {
   const [tab, setTab] = useState<Tab>(() => initialTab());
+  const [termTab, setTermTab] = useState<TermTab>(() => initialTermTab());
+  const [termCollapsed, setTermCollapsed] = useState<boolean>(() => initialCollapsed());
+  const [termHeight, setTermHeight] = useState<number>(() => initialHeight());
   const [circuitJson, setCircuitJson] = useState<unknown[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
   const [mode, setMode] = useState<CompileMode | "compilation…">("compilation…");
@@ -51,11 +83,13 @@ export default function App() {
   const [shot, setShot] = useState<Shot | null>(null);
   const [shotErr, setShotErr] = useState<string | null>(null);
   const [shotBusy, setShotBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
   const viewRef = useRef<HTMLDivElement | null>(null);
+  const copyTimer = useRef<number | null>(null);
 
   const log = useCallback(
     (msg: string) =>
-      setLogs((l) => [...l.slice(-49), `[${new Date().toISOString().slice(11, 19)}] ${msg}`]),
+      setLogs((l) => [...l.slice(-99), `[${new Date().toISOString().slice(11, 19)}] ${msg}`]),
     [],
   );
 
@@ -81,22 +115,16 @@ export default function App() {
 
   useEffect(() => {
     let alive = true;
-    (async () => {
+    const fetchBoot = async () => {
       try {
         const s = (await invoke("get_boot_state")) as { ready: boolean; url: string; pid: number };
         if (alive) setBoot(s.ready ? `prêt — ${s.url} (pid ${s.pid})` : "démarrage…");
       } catch {
         if (alive) setBoot("hors Tauri (dev navigateur) — download seul");
       }
-    })();
-    const id = window.setInterval(async () => {
-      try {
-        const s = (await invoke("get_boot_state")) as { ready: boolean; url: string; pid: number };
-        if (alive) setBoot(s.ready ? `prêt — ${s.url} (pid ${s.pid})` : "démarrage…");
-      } catch {
-        /* dev navigateur : ignore */
-      }
-    }, 5000);
+    };
+    void fetchBoot();
+    const id = window.setInterval(fetchBoot, 5000);
     return () => {
       alive = false;
       window.clearInterval(id);
@@ -104,26 +132,29 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      const t = e.target as HTMLElement;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-      const order: Tab[] = ["schema", "pcb", "3d"];
-      const i = order.indexOf(tab);
-      if (e.key === "ArrowRight") setTab(order[(i + 1) % order.length]!);
-      if (e.key === "ArrowLeft") setTab(order[(i + order.length - 1) % order.length]!);
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [tab]);
-
-  useEffect(() => {
     const url = new URL(window.location.href);
     url.searchParams.set("tab", tab);
+    url.searchParams.set("term", termTab);
     window.history.replaceState(null, "", url);
-  }, [tab]);
+  }, [tab, termTab]);
+
+  useEffect(() => {
+    window.localStorage.setItem("nia.term.height", String(termHeight));
+  }, [termHeight]);
+
+  useEffect(() => {
+    window.localStorage.setItem("nia.term.collapsed", termCollapsed ? "1" : "0");
+  }, [termCollapsed]);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimer.current) window.clearTimeout(copyTimer.current);
+    };
+  }, []);
 
   const stats = computeStats(circuitJson);
   const ready = mode === "worker-blob-local" || mode === "worker-blob-local-nocdn";
+  const compiling = mode === "compilation…";
 
   async function onShot() {
     setShotErr(null);
@@ -156,157 +187,192 @@ export default function App() {
         height: r.height,
         previewUrl,
       });
+      setTermTab("shot");
+      setTermCollapsed(false);
     } catch (e) {
       setShotErr(e instanceof Error ? e.message : String(e));
+      setTermTab("shot");
+      setTermCollapsed(false);
     } finally {
       setShotBusy(false);
     }
   }
 
+  function onCopyTsx() {
+    void navigator.clipboard
+      ?.writeText(BOARD_CODE)
+      .then(() => {
+        setCopied(true);
+        if (copyTimer.current) window.clearTimeout(copyTimer.current);
+        copyTimer.current = window.setTimeout(() => setCopied(false), 1600);
+      })
+      .catch(() => setCopied(false));
+  }
+
   return (
-    <div className="studio">
-      <header className="studio-header">
+    <div className="app">
+      <a href="#viewer" className="skip-link">
+        Aller au visualiseur
+      </a>
+
+      <header className="topbar">
         <div className="brand">
-          <span className="brand-dot" aria-hidden />
-          <div>
-            <h1>NIATSCIRCUIT Studio</h1>
-            <p className="subtitle">board nia-demo — R1/R2 + U1 · {boot}</p>
+          <span className="brand-tile" aria-hidden="true">
+            <CircuitBoard size={16} aria-hidden="true" />
+          </span>
+          <div className="brand-text">
+            <h1 translate="no">NIATSCIRCUIT Studio</h1>
+            <p className="brand-sub">
+              <span translate="no">nia-demo</span> — R1/R2 + U1
+            </p>
           </div>
         </div>
-        <div className="header-badges">
-          <span className={`pill ${ready ? "pill-ok" : mode === "compilation…" ? "pill-busy" : "pill-ko"}`}>
-            {mode === "compilation…" ? "compilation…" : ready ? "prêt" : "dégradé"}
+
+        <Tabs
+          value={tab}
+          onValueChange={(v) => setTab(v as Tab)}
+          className="viewer-tabs"
+        >
+          <TabsList aria-label="Viewers">
+            {(["schema", "pcb", "3d"] as Tab[]).map((t) => (
+              <TabsTrigger key={t} value={t}>
+                {TAB_LABEL[t]}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </Tabs>
+
+        <div className="topbar-actions">
+          <span aria-live="polite" className="status-live">
+            <Badge variant={ready ? "success" : compiling ? "warning" : "destructive"}>
+              {compiling ? "Compilation…" : ready ? "Prêt" : "Dégradé"}
+            </Badge>
+            <Badge variant="outline" translate="no">
+              {mode}
+            </Badge>
           </span>
-          <span className="pill pill-mode">{mode}</span>
+          <Separator orientation="vertical" />
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="offline-wrap">
+                  <input
+                    id="offline-strict"
+                    type="checkbox"
+                    checked={disableCdn}
+                    onChange={(e) => setDisableCdn(e.target.checked)}
+                  />
+                  <label htmlFor="offline-strict">
+                    <WifiOff size={13} aria-hidden="true" />
+                    Offline
+                  </label>
+                </span>
+              </TooltipTrigger>
+              <TooltipContent>Simule le mode strictement offline</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setNonce((n) => n + 1)}
+                  aria-label="Recompiler la carte"
+                >
+                  <RotateCw size={15} aria-hidden="true" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Recompiler</TooltipContent>
+            </Tooltip>
+            <Button
+              variant="default"
+              size="sm"
+              onClick={onShot}
+              disabled={shotBusy || circuitJson.length === 0}
+            >
+              <Camera size={14} aria-hidden="true" />
+              {shotBusy ? "Capture…" : "Screenshot"}
+            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setTermCollapsed(!termCollapsed)}
+                  aria-label={termCollapsed ? "Déplier le terminal" : "Replier le terminal"}
+                  aria-expanded={!termCollapsed}
+                >
+                  <PanelBottom size={15} aria-hidden="true" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Terminal</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         </div>
       </header>
 
       {banner && (
-        <div className={`banner ${mode === "echec" ? "banner-error" : "banner-warn"}`} role="status">
-          <span aria-hidden>⚠️</span> {banner}
+        <div
+          className={`notice ${mode === "echec" ? "notice-error" : "notice-warn"}`}
+          role="status"
+        >
+          {mode === "echec" ? (
+            <TriangleAlert size={13} aria-hidden="true" />
+          ) : (
+            <WifiOff size={13} aria-hidden="true" />
+          )}
+          <span>{banner}</span>
         </div>
       )}
 
-      <div className="toolbar">
-        <div className="tabs" role="tablist" aria-label="Viewers">
-          {(["schema", "pcb", "3d"] as Tab[]).map((t) => (
-            <button
-              key={t}
-              role="tab"
-              aria-selected={tab === t}
-              className={`tab ${tab === t ? "tab-active" : ""}`}
-              onClick={() => setTab(t)}
-            >
-              {TAB_LABEL[t]}
-            </button>
-          ))}
+      <main id="viewer" className="viewer-main" aria-label={`Visualiseur ${TAB_LABEL[tab]}`}>
+        <div className="viewer-chips" aria-hidden="true">
+          <span className="viewer-chip">
+            {TAB_LABEL[tab]} · <code translate="no">{KIND[tab]}</code>
+          </span>
+          <span className="viewer-chip">{stats.total} éléments</span>
         </div>
-        <div className="toolbar-actions">
-          <label className="offline-check" title="Simule le mode strictement offline">
-            <input
-              type="checkbox"
-              checked={disableCdn}
-              onChange={(e) => setDisableCdn(e.target.checked)}
-            />
-            offline strict
-          </label>
-          <button className="btn btn-ghost" onClick={() => setNonce((n) => n + 1)}>
-            ↻ recompiler
-          </button>
-          <button className="btn btn-primary" onClick={onShot} disabled={shotBusy || circuitJson.length === 0}>
-            {shotBusy ? "capture…" : "📸 Screenshot agent"}
-          </button>
+        <div ref={viewRef} className="viewer-body">
+          {circuitJson.length === 0 ? (
+            <div className="viewer-empty">
+              {compiling
+                ? "Compilation partagée en cours…"
+                : "Pas de circuit-json — ouvre la Console du terminal pour le diagnostic."}
+            </div>
+          ) : (
+            <ViewerErrorBoundary tabName={tab}>
+              {tab === "schema" ? (
+                <SchematicViewer circuitJson={circuitJson as never} />
+              ) : tab === "pcb" ? (
+                <PCBViewer circuitJson={circuitJson as never} />
+              ) : (
+                <CadViewer circuitJson={circuitJson as never} />
+              )}
+            </ViewerErrorBoundary>
+          )}
         </div>
-      </div>
-
-      <main className="layout">
-        <section className="viewer-card">
-          <div className="viewer-card-head">
-            <span>
-              {TAB_LABEL[tab]} · contrat <code>{KIND[tab]}</code>
-            </span>
-            <span className="viewer-count">{stats.total} éléments</span>
-          </div>
-          <div ref={viewRef} className="viewer-body">
-            {circuitJson.length === 0 ? (
-              <div className="viewer-empty">
-                {mode === "compilation…" ? "Compilation partagée en cours…" : "Pas de circuit-json — voir bandeau/logs ci-dessous."}
-              </div>
-            ) : (
-              <ViewerErrorBoundary tabName={tab}>
-                {tab === "schema" ? (
-                  <SchematicViewer circuitJson={circuitJson as never} />
-                ) : tab === "pcb" ? (
-                  <PCBViewer circuitJson={circuitJson as never} />
-                ) : (
-                  <CadViewer circuitJson={circuitJson as never} />
-                )}
-              </ViewerErrorBoundary>
-            )}
-          </div>
-        </section>
-
-        <aside className="side">
-          <section className="card">
-            <h2>État</h2>
-            <dl className="stats">
-              <div><dt>composants</dt><dd>{stats.components}</dd></div>
-              <div><dt>traces</dt><dd>{stats.traces}</dd></div>
-              <div><dt>nets</dt><dd>{stats.nets}</dd></div>
-              <div><dt>total</dt><dd>{stats.total}</dd></div>
-            </dl>
-            <details className="logs">
-              <summary>logs compile ({logs.length})</summary>
-              <pre>{logs.join("\n") || "(vide)"}</pre>
-            </details>
-            <details>
-              <summary>TSX source (lecture)</summary>
-              <pre className="tsx">{BOARD_CODE}</pre>
-            </details>
-          </section>
-
-          <section className="card">
-            <h2>Screenshot agent</h2>
-            {shotErr && <p className="shot-error">Échec : {shotErr}</p>}
-            {shot ? (
-              <div className="shot">
-                <p>
-                  PNG {shot.width}×{shot.height} · base64 ≈ <strong>{shot.bytes} octets</strong>
-                  <br />
-                  <span className="muted">moteur : {shot.backend} · source : {KIND[tab]}</span>
-                  {shot.previewUrl && (
-                    <>
-                      <br />
-                      <span className="muted">lien preview locale : </span>
-                      <code className="preview-url">{shot.previewUrl}</code>
-                    </>
-                  )}
-                  {!shot.previewUrl && (
-                    <>
-                      <br />
-                      <span className="muted">hors Tauri : download seul (ouvre l&apos;app pour l&apos;agent).</span>
-                    </>
-                  )}
-                </p>
-                <img src={shot.dataUrl} alt={`screenshot ${KIND[tab]}`} className="shot-img" />
-                <a href={shot.dataUrl} download={`agent-${KIND[tab]}.png`} className="btn btn-ghost">
-                  ⬇ télécharger le PNG
-                </a>
-              </div>
-            ) : (
-              <p className="muted">
-                Capture l&apos;onglet courant pour l&apos;agent (PNG base64 + taille + lien preview
-                locale <code>file://</code>).
-              </p>
-            )}
-          </section>
-
-          <p className="fallback-note">
-            Sans GPU (WebGPU rendering failed constaté au prototype), les vues PCB/3D basculent sur
-            fallback SVG/canvas 2D documenté — jamais d&apos;image inventée.
-          </p>
-        </aside>
       </main>
+
+      <Terminal
+        tab={termTab}
+        onTabChange={setTermTab}
+        collapsed={termCollapsed}
+        onCollapsedChange={setTermCollapsed}
+        height={termHeight}
+        onHeightChange={setTermHeight}
+        logs={logs}
+        stats={stats}
+        boot={boot}
+        modeLabel={mode}
+        ready={ready}
+        tsx={BOARD_CODE}
+        copied={copied}
+        onCopyTsx={onCopyTsx}
+        shot={shot}
+        shotErr={shotErr}
+        shotBusy={shotBusy}
+        source={KIND[tab]}
+        onShot={onShot}
+      />
     </div>
   );
 }
