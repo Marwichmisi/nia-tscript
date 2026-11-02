@@ -1,0 +1,84 @@
+name: release
+
+# Builds Tauri bundles (Linux/Windows/macOS arm64) + sidecar pcb-mcp,
+# and attaches them to the GitHub release matching the app version.
+# Trigger: push a v* tag (e.g. v0.1.2, app version in src-tauri/tauri.conf.json),
+# or manual run (targets the release of the current app version).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  publish-tauri:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            args: ""
+          - platform: windows-latest
+            args: ""
+          - platform: macos-latest # Apple Silicon (arm64). Intel: add x86_64-apple-darwin + sidecar cross-compile.
+            args: "--target aarch64-apple-darwin"
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install dependencies (ubuntu only)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: setup bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: src/package-lock.json
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: install frontend dependencies
+        working-directory: src
+        run: npm ci
+
+      - name: build sidecar pcb-mcp
+        working-directory: pcb-mcp
+        run: |
+          bun install --frozen-lockfile
+          bun scripts/build.mjs
+
+      - name: build frontend dist
+        working-directory: src
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: npm run build
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: src-tauri
+          tagName: v__VERSION__
+          releaseName: "NIATSCIRCUIT Studio v__VERSION__"
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
