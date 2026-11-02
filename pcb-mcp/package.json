@@ -8,7 +8,8 @@
     "build": "node scripts/build.mjs",
     "dev": "bun src/server.ts serve --port 4123",
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "matrix": "bun scripts/matrix-v1.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "^2.0.0",
