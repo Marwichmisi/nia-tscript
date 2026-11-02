@@ -1,6 +1,8 @@
 node_modules/
 dist/
 *.local
+nohup.out
+.fuse_hidden*
 
 # Rust / Tauri
 src-tauri/target/

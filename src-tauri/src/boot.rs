@@ -37,10 +37,6 @@ pub struct McpLock {
 
 pub const REGISTRY_REL: &str = "niatscircuit/projects.json";
 
-pub fn registry_path(cache_dir: &Path) -> PathBuf {
-    cache_dir.join(REGISTRY_REL)
-}
-
 /// Tire un port libre sur 127.0.0.1 (bind `:0` puis release).
 /// Helper testé du seam ; le boot prod lie atomiquement (pas de race),
 /// réutilisé tel quel par le spawn sidecar en #10.
@@ -424,6 +420,7 @@ pub fn find_bridge_in(candidates: &[PathBuf]) -> Option<PathBuf> {
 /// Vrai binaire compilé (`bun build --compile` ≈ 100 Mo) vs stub shell
 /// (`scripts/ensure-sidecar-stub.sh`, quelques octets) : heuristique de
 /// taille pour les tests (le stub ne sert aucun MCP).
+#[allow(dead_code)]
 pub fn is_real_sidecar_bin(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.len() > 1_000_000)
 }
