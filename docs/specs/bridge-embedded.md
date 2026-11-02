@@ -67,7 +67,7 @@ Règles :
   absolu codé en dur (le layout `$RESOURCE` diffère par OS/packaging :
   `Contents/Resources` macOS, dossier install Linux/Windows ; le runtime sait).
 - Au boot (`boot_or_attach`, `lib.rs`) : log une ligne
-  `mcp-bridge : <chemin absolu>` (chemin seul, pas de token).
+  `[boot] pont MCP : <chemin absolu>` (chemin seul, pas de token).
   Si introuvable : `bridge_path = ""` + log warn, le reste du boot continue
   (le MCP reste joignable en HTTP directe via lockfile).
 - `BootState` (`lib.rs:33-39`) gagne un champ `bridge_path: String`
@@ -83,8 +83,9 @@ ordre prod-avant-dev, `bridge_path` vide sans panique.
 
 - Affiche `pont : <bridge_path>` quand non vide, sinon rien (pas d erreur :
   HTTP directe reste le secours documenté).
-- Bouton « copier » par agent ? Minimal : un seul bouton copiant la commande
-  OpenCode (agent P0 le plus courant), le README liste les 4 variantes.
+- Bouton « copier » : copie `node "<bridge_path>"` (fragment collable dans
+  les 4 templates §5 — le chemin seul sert tous les agents, pas juste OpenCode),
+  avec retour visuel Copié. Le README liste les 4 variantes.
 - Aucune écriture vers `~/.config`, `.mcp.json`, `config.toml` — l'app ne
   touche jamais aux fichiers perso (décision #23 maintenue).
 

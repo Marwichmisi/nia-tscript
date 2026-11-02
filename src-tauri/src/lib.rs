@@ -36,6 +36,9 @@ struct BootState {
     pid: u32,
     url: String,
     protocol_version: String,
+    /// Pont MCP embarqué (#26) : chemin absolu résolu au boot, "" si absent.
+    /// L'UI l'affiche + le copie ; jamais de token ici.
+    bridge_path: String,
 }
 
 impl BootState {
@@ -46,8 +49,33 @@ impl BootState {
             pid: lock.pid,
             url: lock.url.clone(),
             protocol_version: lock.protocol_version.clone(),
+            bridge_path: String::new(),
         }
     }
+
+    fn with_bridge_path(mut self, path: String) -> Self {
+        self.bridge_path = path;
+        self
+    }
+}
+
+/// Pont MCP embarqué (#26) : candidats prod (`$RESOURCE` bundlé) puis dev
+/// (repo via `CARGO_MANIFEST_DIR`), sélection via `boot::find_bridge_in`
+/// (duo `bridge.mjs` + `lib.mjs` exigé). Jamais de chemin codé en dur :
+/// le layout `$RESOURCE` varie par OS/packaging, le runtime sait.
+fn find_bridge(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    use tauri::path::BaseDirectory;
+    let mut out = Vec::new();
+    if let Ok(res) = app
+        .path()
+        .resolve("bridge/bridge.mjs", BaseDirectory::Resource)
+    {
+        out.push(res);
+    }
+    out.push(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../bridge/bridge.mjs"),
+    );
+    boot::find_bridge_in(&out)
 }
 
 #[tauri::command]
@@ -151,6 +179,16 @@ pub fn run() {
 /// 4. repli stub interne (#9) si binaire absent ou spawn KO répété.
 /// 5. écriture lockfile 0600 APRÈS readiness. Token jamais loggé.
 fn boot_or_attach(app: &tauri::AppHandle) -> Result<BootState, String> {
+    // Pont embarqué (#26) résolu AVANT tout : l'UI + le README en dépendent,
+    // mais son absence ne bloque jamais le boot (HTTP directe via lockfile).
+    let bridge_path = find_bridge(app)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if bridge_path.is_empty() {
+        eprintln!("[boot] pont MCP embarqué introuvable (repli HTTP directe via lockfile)");
+    } else {
+        eprintln!("[boot] pont MCP : {bridge_path}");
+    }
     let cache_dir = app
         .path()
         .app_cache_dir()
@@ -162,7 +200,7 @@ fn boot_or_attach(app: &tauri::AppHandle) -> Result<BootState, String> {
         let alive = boot::is_process_alive(existing.pid);
         let ok = boot::probe_ready(&existing.url, &existing.token);
         if boot::should_reuse_lock(alive, ok) {
-            return Ok(BootState::from_lock(&existing, true));
+            return Ok(BootState::from_lock(&existing, true).with_bridge_path(bridge_path));
         }
     }
 
@@ -190,7 +228,8 @@ fn boot_or_attach(app: &tauri::AppHandle) -> Result<BootState, String> {
                         eprintln!(
                             "[boot] sidecar pcb-mcp prêt sur {url} (tentative {attempt})"
                         );
-                        return Ok(BootState::from_lock(&lock, true));
+                        return Ok(BootState::from_lock(&lock, true)
+                            .with_bridge_path(bridge_path));
                     }
                     last_err = format!("sidecar non ready sur {url}");
                     eprintln!("[boot] {last_err} (tentative {attempt}/3)");
@@ -211,13 +250,13 @@ fn boot_or_attach(app: &tauri::AppHandle) -> Result<BootState, String> {
     eprintln!("[boot] binaire pcb-mcp absent, repli stub #9");
 
     // 4. Stub interne (#9 ; dev sans `bun build --compile`).
-    boot_fresh_stub(&lock_path)
+    boot_fresh_stub(&lock_path, bridge_path)
 }
 
 /// Boot frais sur le stub interne : bind atomique 127.0.0.1:0 (le port final
 /// est celui du lockfile, pas de race), token éphémère, readiness pollée
 /// jusqu'à 10 s puis lockfile 0600 APRÈS readiness.
-fn boot_fresh_stub(lock_path: &std::path::Path) -> Result<BootState, String> {
+fn boot_fresh_stub(lock_path: &std::path::Path, bridge_path: String) -> Result<BootState, String> {
     // Bind atomique (le port final = celui du lockfile).
     let listener =
         TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("bind 127.0.0.1: {e}"))?;
@@ -251,5 +290,5 @@ fn boot_fresh_stub(lock_path: &std::path::Path) -> Result<BootState, String> {
     boot::write_lockfile(&lock_path, &lock)
         .map_err(|e| format!("écriture lockfile: {e}"))?;
 
-    Ok(BootState::from_lock(&lock, true))
+    Ok(BootState::from_lock(&lock, true).with_bridge_path(bridge_path))
 }

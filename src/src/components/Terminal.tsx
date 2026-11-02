@@ -41,6 +41,9 @@ interface TerminalProps {
   logs: string[];
   stats: { components: number; traces: number; nets: number; total: number };
   boot: string;
+  bridge: string;
+  bridgeCopied: boolean;
+  onCopyBridge: () => void;
   modeLabel: string;
   ready: boolean;
   tsx: string;
@@ -232,6 +235,25 @@ export function Terminal(props: TerminalProps) {
                   <dt>Sidecar</dt>
                   <dd className="term-truncate">{props.boot}</dd>
                 </div>
+                {props.bridge && (
+                  <div className="term-stats-wide">
+                    <dt>Pont MCP</dt>
+                    <dd className="term-truncate">
+                      <code translate="no">{props.bridge}</code>{" "}
+                      <Button variant="ghost" size="sm" onClick={props.onCopyBridge}>
+                        {props.bridgeCopied ? (
+                          <>
+                            <Check size={13} aria-hidden="true" /> Copié
+                          </>
+                        ) : (
+                          <>
+                            <Copy size={13} aria-hidden="true" /> Copier la commande
+                          </>
+                        )}
+                      </Button>
+                    </dd>
+                  </div>
+                )}
               </dl>
             </TabsContent>
 

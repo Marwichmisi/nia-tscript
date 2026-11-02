@@ -86,6 +86,31 @@ function useElementHeight(ref: React.RefObject<HTMLElement | null>): number {
   return h;
 }
 
+/** Feedback « Copié » après clipboard (TSX, pont MCP…) : un hook par bouton,
+ *  le timer est nettoyé au démontage. Remplace la duplication onCopyTsx /
+ *  onCopyBridge (même writeText + timeout 1600 ms). */
+function useCopyFeedback(): { copied: boolean; copy: (text: string) => void } {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (timer.current) window.clearTimeout(timer.current);
+    };
+  }, []);
+  function copy(text: string) {
+    if (!text) return;
+    void navigator.clipboard
+      ?.writeText(text)
+      .then(() => {
+        setCopied(true);
+        if (timer.current) window.clearTimeout(timer.current);
+        timer.current = window.setTimeout(() => setCopied(false), 1600);
+      })
+      .catch(() => setCopied(false));
+  }
+  return { copied, copy };
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>(() => initialTab());
   const [termTab, setTermTab] = useState<TermTab>(() => initialTermTab());
@@ -98,12 +123,13 @@ export default function App() {
   const [disableCdn, setDisableCdn] = useState(false);
   const [nonce, setNonce] = useState(0);
   const [boot, setBoot] = useState<string>("démarrage…");
+  const [bridge, setBridge] = useState<string>("");
   const [shot, setShot] = useState<Shot | null>(null);
   const [shotErr, setShotErr] = useState<string | null>(null);
   const [shotBusy, setShotBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const tsxCopy = useCopyFeedback();
+  const bridgeCopy = useCopyFeedback();
   const viewRef = useRef<HTMLDivElement | null>(null);
-  const copyTimer = useRef<number | null>(null);
 
   const log = useCallback(
     (msg: string) =>
@@ -135,7 +161,13 @@ export default function App() {
     let alive = true;
     const fetchBoot = async () => {
       try {
-        const s = (await invoke("get_boot_state")) as { ready: boolean; url: string; pid: number };
+        const s = (await invoke("get_boot_state")) as {
+          ready: boolean;
+          url: string;
+          pid: number;
+          bridge_path?: string;
+        };
+        setBridge(s.bridge_path ?? "");
         if (alive) setBoot(s.ready ? `prêt — ${s.url} (pid ${s.pid})` : "démarrage…");
       } catch {
         if (alive) setBoot("hors Tauri (dev navigateur) — download seul");
@@ -163,12 +195,6 @@ export default function App() {
   useEffect(() => {
     window.localStorage.setItem("nia.term.collapsed", termCollapsed ? "1" : "0");
   }, [termCollapsed]);
-
-  useEffect(() => {
-    return () => {
-      if (copyTimer.current) window.clearTimeout(copyTimer.current);
-    };
-  }, []);
 
   const stats = computeStats(circuitJson);
   const ready = mode === "worker-blob-local" || mode === "worker-blob-local-nocdn";
@@ -215,17 +241,6 @@ export default function App() {
     } finally {
       setShotBusy(false);
     }
-  }
-
-  function onCopyTsx() {
-    void navigator.clipboard
-      ?.writeText(BOARD_CODE)
-      .then(() => {
-        setCopied(true);
-        if (copyTimer.current) window.clearTimeout(copyTimer.current);
-        copyTimer.current = window.setTimeout(() => setCopied(false), 1600);
-      })
-      .catch(() => setCopied(false));
   }
 
   return (
@@ -384,11 +399,14 @@ export default function App() {
         logs={logs}
         stats={stats}
         boot={boot}
+        bridge={bridge}
+        bridgeCopied={bridgeCopy.copied}
+        onCopyBridge={() => bridgeCopy.copy(bridge ? `node "${bridge}"` : "")}
         modeLabel={mode}
         ready={ready}
         tsx={BOARD_CODE}
-        copied={copied}
-        onCopyTsx={onCopyTsx}
+        copied={tsxCopy.copied}
+        onCopyTsx={() => tsxCopy.copy(BOARD_CODE)}
         shot={shot}
         shotErr={shotErr}
         shotBusy={shotBusy}

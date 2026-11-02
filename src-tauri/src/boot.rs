@@ -350,6 +350,28 @@ pub fn find_sidecar_bin() -> Option<PathBuf> {
     })
 }
 
+// --- Pont MCP embarqué (#26) -------------------------------------------------
+//
+// `bridge.mjs` + `lib.mjs` voyagent dans le bundle (tauri.conf.json >
+// bundle > resources, forme map). Le runtime importe `./lib.mjs`, d'où
+// l'exigence du duo.
+
+/// Premier candidat contenant `bridge.mjs` ET son sibling `lib.mjs`,
+/// sinon `None`. Pur et testé ; la résolution `$RESOURCE` (AppHandle)
+/// et le repli dev vivent dans le glue appelant.
+pub fn find_bridge_in(candidates: &[PathBuf]) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .find(|p| {
+            p.file_name().and_then(|n| n.to_str()) == Some("bridge.mjs")
+                && p.is_file()
+                && p.parent()
+                    .map(|d| d.join("lib.mjs").is_file())
+                    .unwrap_or(false)
+        })
+        .cloned()
+}
+
 /// Vrai binaire compilé (`bun build --compile` ≈ 100 Mo) vs stub shell
 /// (`scripts/ensure-sidecar-stub.sh`, quelques octets) : heuristique de
 /// taille pour les tests (le stub ne sert aucun MCP).
@@ -527,6 +549,64 @@ mod tests {
         assert!(!should_reuse_lock(true, false));
         assert!(!should_reuse_lock(false, true));
         assert!(!should_reuse_lock(false, false));
+    }
+
+    // --- Pont MCP embarqué (#26) : sélection du candidat ---------------------
+
+    fn write_bridge_pair(dir: &Path, with_lib: bool) -> PathBuf {
+        std::fs::create_dir_all(dir).expect("mkdir candidat pont");
+        let bridge = dir.join("bridge.mjs");
+        std::fs::write(&bridge, "#!/usr/bin/env node\n").expect("write bridge.mjs");
+        if with_lib {
+            std::fs::write(dir.join("lib.mjs"), "// helpers\n").expect("write lib.mjs");
+        }
+        bridge
+    }
+
+    fn bridge_tmp(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "nia-bridge-test-{}-{}",
+            std::process::id(),
+            name
+        ))
+    }
+
+    #[test]
+    fn bridge_prefers_first_complete_candidate() {
+        let base = bridge_tmp("order");
+        let _ = std::fs::remove_dir_all(&base);
+        let a = base.join("a");
+        let b = base.join("b");
+        let expect = write_bridge_pair(&a, true);
+        write_bridge_pair(&b, true);
+        assert_eq!(
+            super::find_bridge_in(&[a.join("bridge.mjs"), b.join("bridge.mjs")]),
+            Some(expect)
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn bridge_skips_candidate_missing_lib_sibling() {
+        let base = bridge_tmp("sibling");
+        let _ = std::fs::remove_dir_all(&base);
+        let a = base.join("a");
+        let b = base.join("b");
+        write_bridge_pair(&a, false);
+        let expect = write_bridge_pair(&b, true);
+        assert_eq!(
+            super::find_bridge_in(&[a.join("bridge.mjs"), b.join("bridge.mjs")]),
+            Some(expect)
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn bridge_returns_none_when_absent() {
+        let base = bridge_tmp("absent");
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(super::find_bridge_in(&[base.join("bridge.mjs")]), None);
+        assert_eq!(super::find_bridge_in(&[]), None);
     }
 
     #[test]

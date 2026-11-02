@@ -36,29 +36,37 @@ Override (tests, debug) : `NIATSCIRCUIT_MCP_LOCK=/chemin/mcp.json`.
 ```bash
 # claude code
 claude mcp add --transport stdio niatscircuit -- node /chemin/vers/bridge/bridge.mjs
-# variante publiée npm :
+# variante publiée npm (SEULEMENT si le paquet est publié et vérifié :
+# `npm view @nia-tscircuit/mcp-bridge version` doit répondre, sinon ignore) :
 claude mcp add --transport stdio niatscircuit -- npx -y @nia-tscircuit/mcp-bridge
 ```
 
 ```jsonc
-// opencode (opencode.json)
-{ "mcp": { "niatscircuit": { "type": "local",
-  "command": ["node", "bridge/bridge.mjs"] } } }
+// opencode V2 (opencode.json) — serveurs sous mcp.servers (plus sous mcp.<nom>)
+{ "mcp": { "servers": { "niatscircuit": { "type": "local",
+  "command": ["node", "/ABS/NIATSCIRCUIT/bridge/bridge.mjs"],
+  "protocol": "auto" } } } }
+```
+
+```bash
+# variante CLI (recommandée perso) — /ABS = chemin ABSOLU du checkout
+opencode mcp add niatscircuit --global -- node /ABS/NIATSCIRCUIT/bridge/bridge.mjs
+opencode mcp list   # ✓ niatscircuit connected (app ouverte requise)
 ```
 
 ```toml
-# codex (~/.codex/config.toml)
+# codex (~/.codex/config.toml) — chemin ABSOLU obligatoire
 [mcp_servers.niatscircuit]
 command = "node"
-args = ["bridge/bridge.mjs"]  # chemin absolu recommandé
+args = ["/ABS/NIATSCIRCUIT/bridge/bridge.mjs"]
 startup_timeout_sec = 10
 tool_timeout_sec = 60
 ```
 
 ```jsonc
-// cursor (.cursor/mcp.json)
+// cursor (.cursor/mcp.json) — chemin ABSOLU, secrets via ${env:...}
 { "mcpServers": { "niatscircuit": {
-  "command": "node", "args": ["bridge/bridge.mjs"] } } }
+  "command": "node", "args": ["/ABS/NIATSCIRCUIT/bridge/bridge.mjs"] } } }
 ```
 
 ## HTTP directe (secours, token éphémère du lockfile)
@@ -67,8 +75,9 @@ tool_timeout_sec = 60
 LOCK=$HOME/.cache/niatscircuit/mcp.json  # macOS: ~/Library/Caches/niatscircuit/mcp.json
 URL=$(python3 -c "import json;print(json.load(open('$LOCK'))['url'])")
 TOK=$(python3 -c "import json;print(json.load(open('$LOCK'))['token'])")
-# opencode : { "type": "remote", "url": "$URL",
+# opencode V2 : { "type": "remote", "url": "$URL",
 #   "headers": { "Authorization": "Bearer $TOK" }, "oauth": false }
+# (token éphémère, jamais commité ; 401 = token tourné depuis un restart → ré-extraire)
 ```
 
 ## Tests

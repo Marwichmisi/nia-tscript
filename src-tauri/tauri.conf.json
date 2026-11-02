@@ -19,7 +19,7 @@
     "security": {
       "csp": {
         "default-src": "'self'",
-        "script-src": "'self' 'wasm-unsafe-eval'",
+        "script-src": "'self' 'wasm-unsafe-eval' 'unsafe-eval'",
         "worker-src": "'self' blob:",
         "img-src": "'self' asset: http://asset.localhost blob: data:",
         "style-src": "'self' 'unsafe-inline'",
@@ -38,6 +38,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/pcb-mcp"]
+    "externalBin": ["binaries/pcb-mcp"],
+    "resources": {
+      "../bridge/bridge.mjs": "bridge/bridge.mjs",
+      "../bridge/lib.mjs": "bridge/lib.mjs"
+    }
   }
 }
