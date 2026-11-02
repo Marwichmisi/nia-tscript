@@ -63,7 +63,7 @@ jobs:
       - name: build sidecar pcb-mcp
         working-directory: pcb-mcp
         run: |
-          bun install --frozen-lockfile
+          bun install
           bun scripts/build.mjs
 
       - name: build frontend dist
