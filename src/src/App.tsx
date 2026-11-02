@@ -15,6 +15,19 @@ import { BOARD_CODE } from "./lib/board";
 import { computeStats } from "./lib/board";
 import { compileBoard, type CompileMode } from "./lib/compile";
 import { captureScreenshot, type PreviewSource } from "./lib/screenshot";
+import { Home } from "./components/Home";
+import {
+  closeProject as closeProj,
+  createProject as createProj,
+  currentProject,
+  deleteProject as deleteProj,
+  forgetProject as forgetProj,
+  listProjects,
+  openProject as openProj,
+  projectName,
+  readProjectMain,
+  type ProjectItem,
+} from "./lib/projects";
 import { ViewerErrorBoundary } from "./components/ErrorBoundary";
 import { Terminal, type Shot, type TermTab } from "./components/Terminal";
 import { Button } from "./components/ui/button";
@@ -112,6 +125,12 @@ function useCopyFeedback(): { copied: boolean; copy: (text: string) => void } {
 }
 
 export default function App() {
+  const [projectPath, setProjectPath] = useState<string | null>(null);
+  const [projectCode, setProjectCode] = useState<string>(BOARD_CODE);
+  const [projects, setProjects] = useState<ProjectItem[]>([]);
+  const [lastOpened, setLastOpened] = useState<string | null>(null);
+  const [projBusy, setProjBusy] = useState(false);
+  const [projError, setProjError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>(() => initialTab());
   const [termTab, setTermTab] = useState<TermTab>(() => initialTermTab());
   const [termCollapsed, setTermCollapsed] = useState<boolean>(() => initialCollapsed());
@@ -137,7 +156,102 @@ export default function App() {
     [],
   );
 
+  const refreshProjects = useCallback(async () => {
+    try {
+      const cur = await currentProject().catch(() => null);
+      setProjectPath(cur);
+      const list = await listProjects().catch(() => ({ projects: [], lastOpened: null }));
+      setProjects(list.projects);
+      setLastOpened(list.lastOpened);
+      if (cur) {
+        try {
+          const main = await readProjectMain(cur);
+          setProjectCode(main.code);
+        } catch {
+          setProjectCode(BOARD_CODE);
+        }
+      }
+    } catch (e) {
+      setProjError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
   useEffect(() => {
+    void refreshProjects();
+  }, [refreshProjects]);
+
+  async function handleOpen(p: string) {
+    setProjBusy(true);
+    setProjError(null);
+    try {
+      const opened = await openProj(p);
+      setProjectPath(opened);
+      const main = await readProjectMain(opened);
+      setProjectCode(main.code);
+      await refreshProjects();
+    } catch (e) {
+      setProjError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setProjBusy(false);
+    }
+  }
+
+  async function handleCreate(p: string, template: "vide" | "demo") {
+    setProjBusy(true);
+    setProjError(null);
+    try {
+      const created = await createProj(p, template);
+      setProjectPath(created);
+      const main = await readProjectMain(created);
+      setProjectCode(main.code);
+      await refreshProjects();
+    } catch (e) {
+      setProjError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setProjBusy(false);
+    }
+  }
+
+  async function handleClose() {
+    setProjBusy(true);
+    try {
+      await closeProj();
+      setProjectPath(null);
+      await refreshProjects();
+    } finally {
+      setProjBusy(false);
+    }
+  }
+
+  async function handleForget(p: string) {
+    setProjBusy(true);
+    try {
+      await forgetProj(p);
+      await refreshProjects();
+    } catch (e) {
+      setProjError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setProjBusy(false);
+    }
+  }
+
+  async function handleDelete(p: string) {
+    if (!window.confirm(`Supprimer le dossier projet ?\n${p}`)) return;
+    setProjBusy(true);
+    try {
+      await deleteProj(p);
+      const cur = await currentProject().catch(() => null);
+      setProjectPath(cur);
+      await refreshProjects();
+    } catch (e) {
+      setProjError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setProjBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!projectPath) return;
     let alive = true;
     setLogs([]);
     setCircuitJson([]);
@@ -146,7 +260,7 @@ export default function App() {
     setShot(null);
     setShotErr(null);
     log("compile partagée core+eval (worker blob-url bundlé, offline-first)…");
-    compileBoard(log, { disableCdnLoading: disableCdn }).then((r) => {
+    compileBoard(log, { disableCdnLoading: disableCdn, code: projectCode }).then((r) => {
       if (!alive) return;
       setCircuitJson(r.circuitJson);
       setMode(r.mode);
@@ -155,7 +269,7 @@ export default function App() {
     return () => {
       alive = false;
     };
-  }, [disableCdn, nonce, log]);
+  }, [disableCdn, nonce, log, projectPath, projectCode]);
 
   useEffect(() => {
     let alive = true;
@@ -243,6 +357,23 @@ export default function App() {
     }
   }
 
+  if (!projectPath) {
+    return (
+      <div className="app">
+        <Home
+          projects={projects}
+          lastOpened={lastOpened}
+          busy={projBusy}
+          error={projError}
+          onOpen={handleOpen}
+          onCreate={handleCreate}
+          onForget={handleForget}
+          onDelete={handleDelete}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="app">
       <a href="#viewer" className="skip-link">
@@ -256,8 +387,8 @@ export default function App() {
           </span>
           <div className="brand-text">
             <h1 translate="no">NIATSCIRCUIT Studio</h1>
-            <p className="brand-sub">
-              <span translate="no">nia-demo</span> — R1/R2 + U1
+            <p className="brand-sub" title={projectPath}>
+              <span translate="no">{projectName(projectPath)}</span> — {projectPath}
             </p>
           </div>
         </div>
@@ -340,6 +471,9 @@ export default function App() {
               </TooltipTrigger>
               <TooltipContent>Terminal</TooltipContent>
             </Tooltip>
+            <Button variant="outline" size="sm" onClick={handleClose} disabled={projBusy}>
+              Fermer
+            </Button>
           </TooltipProvider>
         </div>
       </header>
@@ -404,9 +538,9 @@ export default function App() {
         onCopyBridge={() => bridgeCopy.copy(bridge ? `node "${bridge}"` : "")}
         modeLabel={mode}
         ready={ready}
-        tsx={BOARD_CODE}
+        tsx={projectCode}
         copied={tsxCopy.copied}
-        onCopyTsx={() => tsxCopy.copy(BOARD_CODE)}
+        onCopyTsx={() => tsxCopy.copy(projectCode)}
         shot={shot}
         shotErr={shotErr}
         shotBusy={shotBusy}

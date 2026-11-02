@@ -2,6 +2,18 @@
 // Le TSX reste la seule source de vérité ; le store en mémoire est initialisé
 // avec la fixture R1/R2+U1 du prototype et muté uniquement via `code_patch`.
 import { BOARD_CODE } from "./board.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import {
+  currentProjectPath,
+  ensureProjectLayout,
+  loadRegistry,
+  projectMainPath,
+  saveRegistry,
+  upsertRegistry,
+  writeLockProjectPath,
+} from "./project.js";
 
 export interface BoardState {
   sessionId: string;
@@ -99,7 +111,7 @@ let currentCode: string = BOARD_CODE;
 let lastCompile: BoardState["compile"] | null = null;
 let lastDrcViolations = 0;
 
-/** Remet le store à la fixture (isolation des tests). */
+/** Remet le store à la fixture (isolation des tests). Garantit aussi un Projet ouvert en test (sinon gating NO_PROJECT_OPEN ferait échouer les suites historiques). */
 export function resetStoreForTests(): void {
   LOGS.length = 0;
   LOGS.push(...SEED_LOGS);
@@ -107,6 +119,24 @@ export function resetStoreForTests(): void {
   currentCode = BOARD_CODE;
   lastCompile = null;
   lastDrcViolations = 0;
+  try {
+    if (!currentProjectPath()) {
+      const dir = path.join(os.tmpdir(), "nia-mcp-test-proj");
+      ensureProjectLayout(dir, "vide");
+      // main.tsx vide → recharge fixture démo en mémoire pour les assertions historiques.
+      try {
+        fs.writeFileSync(projectMainPath(dir), BOARD_CODE);
+      } catch {
+        /* best-effort */
+      }
+      const reg = loadRegistry();
+      saveRegistry(upsertRegistry(reg, dir));
+      writeLockProjectPath(dir);
+      currentCode = BOARD_CODE;
+    }
+  } catch {
+    /* best-effort : sans projet test, les outils gated répondront NO_PROJECT_OPEN */
+  }
 }
 
 export function getCode(): string {

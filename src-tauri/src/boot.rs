@@ -29,6 +29,16 @@ pub struct McpLock {
     pub url: String,
     #[serde(rename = "protocolVersion")]
     pub protocol_version: String,
+    /// Projet ouvert exposé au MCP (Q15) : chemin absolu ou null si Accueil.
+    /// `default` garde la compat avec les lockfiles pré-projets.
+    #[serde(rename = "projectPath", default, skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
+}
+
+pub const REGISTRY_REL: &str = "niatscircuit/projects.json";
+
+pub fn registry_path(cache_dir: &Path) -> PathBuf {
+    cache_dir.join(REGISTRY_REL)
 }
 
 /// Tire un port libre sur 127.0.0.1 (bind `:0` puis release).
@@ -103,6 +113,7 @@ pub fn build_lock(port: u16, token: String) -> McpLock {
         pid: std::process::id(),
         started_at: chrono::Utc::now().to_rfc3339(),
         protocol_version: PROTOCOL_VERSION.to_string(),
+        project_path: None,
     }
 }
 

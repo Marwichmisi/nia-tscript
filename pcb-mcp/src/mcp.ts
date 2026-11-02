@@ -37,6 +37,22 @@ import {
   setLastCompile,
   snapshotStore,
 } from "./state.js";
+import {
+  NO_PROJECT_OPEN,
+  currentProjectPath,
+  ensureProjectLayout,
+  listProjects,
+  loadRegistry,
+  persistProjectFiles,
+  projectCircuitPath,
+  projectExportsDir,
+  projectMainPath,
+  projectPreviewsDir,
+  saveRegistry,
+  upsertRegistry,
+  validateProjectPath,
+  writeLockProjectPath,
+} from "./project.js";
 
 export const SERVER_NAME = "pcb-mcp";
 export const SERVER_VERSION = "0.1.0";
@@ -74,6 +90,53 @@ const LogsReadOutput = z.object({
   hasMore: z.boolean(),
   newErrors: z.number(),
 });
+
+// --- Projets (Q4/Q11/Q15) : seuls outils accessibles sans Projet ouvert.
+const ProjectListOutput = z.object({
+  projects: z.array(
+    z.object({
+      path: z.string(),
+      name: z.string(),
+      exists: z.boolean(),
+      lastOpened: z.string(),
+    }),
+  ),
+  lastOpened: z.string().nullable(),
+  current: z.string().nullable(),
+});
+
+const ProjectCreateInput = z.object({
+  path: z.string().describe("Chemin dossier absolu, créé si absent"),
+  template: z.enum(["vide", "demo"]).optional().describe("Contenu initial (défaut: vide)"),
+});
+
+const ProjectOpenInput = z.object({
+  path: z.string().describe("Chemin dossier absolu contenant main.tsx"),
+});
+
+function noProjectError(code: string): { message: string; code: string } {
+  return {
+    message: `aucun projet ouvert : ouvre un projet dans l'app ou via project_open (${code})`,
+    code: NO_PROJECT_OPEN,
+  };
+}
+
+function loadCodeForProject(projectPath: string): void {
+  try {
+    const code = fs.readFileSync(projectMainPath(projectPath), "utf8");
+    if (code.trim()) setCode(code);
+  } catch {
+    // layout garantit main.tsx ; best-effort.
+  }
+}
+
+function persistCurrent(projectPath: string, code: string, circuitJson: unknown[]): void {
+  try {
+    persistProjectFiles(projectPath, code, circuitJson);
+  } catch {
+    // autosave best-effort, la compile reste source de vérité mémoire.
+  }
+}
 
 const CodePatchInput = z.object({
   session_id: z.string().optional().describe("Session mono-board (défaut: default)"),
@@ -388,6 +451,131 @@ export function buildFactory() {
     );
 
     server.registerTool(
+      "project_list",
+      {
+        title: "Lister les projets",
+        description: "Liste les Projets du Registre avec existence disque. Accessible sans Projet ouvert.",
+        inputSchema: z.object({}),
+        outputSchema: ProjectListOutput,
+        annotations: { readOnlyHint: true, destructiveHint: false },
+      },
+      async () => {
+        const { projects, lastOpened } = listProjects();
+        const output = { projects, lastOpened, current: currentProjectPath() };
+        return {
+          content: [{ type: "text", text: JSON.stringify(output) }],
+          structuredContent: output,
+        };
+      },
+    );
+
+    server.registerTool(
+      "project_current",
+      {
+        title: "Projet courant",
+        description: "Retourne le Projet ouvert ou null si Accueil. Accessible sans Projet ouvert.",
+        inputSchema: z.object({}),
+        outputSchema: z.object({ current: z.string().nullable() }),
+        annotations: { readOnlyHint: true, destructiveHint: false },
+      },
+      async () => {
+        const output = { current: currentProjectPath() };
+        return {
+          content: [{ type: "text", text: JSON.stringify(output) }],
+          structuredContent: output,
+        };
+      },
+    );
+
+    server.registerTool(
+      "project_create",
+      {
+        title: "Créer un projet",
+        description: "Crée le dossier Projet (auto-création) avec gabarit vide|demo, l'ouvre et charge son TSX. Refuse dossier non-vide sans main.tsx.",
+        inputSchema: ProjectCreateInput,
+        outputSchema: z.object({
+          path: z.string(),
+          created: z.boolean(),
+          current: z.string().nullable(),
+        }),
+        annotations: { readOnlyHint: false, destructiveHint: false },
+      },
+      async ({ path: p, template }) => {
+        return enqueue(async () => {
+          const dir = validateProjectPath(p);
+          const outcome = ensureProjectLayout(dir, template ?? "vide");
+          const reg = loadRegistry();
+          const next = upsertRegistry(reg, dir);
+          saveRegistry(next);
+          writeLockProjectPath(dir);
+          loadCodeForProject(dir);
+          appendLog("info", "server", `project_create ${dir} (${outcome})`);
+          const output = { path: dir, created: outcome === "created", current: currentProjectPath() };
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        });
+      },
+    );
+
+    server.registerTool(
+      "project_open",
+      {
+        title: "Ouvrir un projet",
+        description: "Ouvre un Projet existant (main.tsx requis), le marque lastOpened et charge son TSX.",
+        inputSchema: ProjectOpenInput,
+        outputSchema: z.object({
+          path: z.string(),
+          current: z.string().nullable(),
+        }),
+        annotations: { readOnlyHint: false, destructiveHint: false },
+      },
+      async ({ path: p }) => {
+        return enqueue(async () => {
+          const dir = validateProjectPath(p);
+          if (!fs.existsSync(dir)) throw new Error("dossier introuvable");
+          if (!fs.existsSync(projectMainPath(dir))) {
+            throw new Error("dossier sans main.tsx : refuse d'ouvrir");
+          }
+          const reg = loadRegistry();
+          const next = upsertRegistry(reg, dir);
+          saveRegistry(next);
+          writeLockProjectPath(dir);
+          loadCodeForProject(dir);
+          appendLog("info", "server", `project_open ${dir}`);
+          const output = { path: dir, current: currentProjectPath() };
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        });
+      },
+    );
+
+    server.registerTool(
+      "project_close",
+      {
+        title: "Fermer le projet",
+        description: "Ramène à l'Accueil et reverrouille le MCP (project_* seuls).",
+        inputSchema: z.object({}),
+        outputSchema: z.object({ current: z.string().nullable() }),
+        annotations: { readOnlyHint: false, destructiveHint: false },
+      },
+      async () => {
+        return enqueue(async () => {
+          writeLockProjectPath(null);
+          appendLog("info", "server", "project_close → Accueil");
+          const output = { current: currentProjectPath() };
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        });
+      },
+    );
+
+    server.registerTool(
       "pcb_state",
       {
         title: "État lecture du studio",
@@ -397,6 +585,22 @@ export function buildFactory() {
         annotations: { readOnlyHint: true, destructiveHint: false },
       },
       async ({ session_id }) => {
+        const proj = currentProjectPath();
+        if (!proj) {
+          const err = noProjectError("pcb_state");
+          const output = {
+            sessionId: session_id ?? "default",
+            board: "",
+            ready: false,
+            compile: { status: "error", errors: 1, warnings: 0 },
+            drc: { violations: 0 },
+            protocolVersion: getBoardState(session_id ?? "default").protocolVersion,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify({ ...output, ...err }) }],
+            structuredContent: output,
+          };
+        }
         const output = getBoardState(session_id ?? "default");
         return {
           content: [{ type: "text", text: JSON.stringify(output) }],
@@ -415,6 +619,14 @@ export function buildFactory() {
         annotations: { readOnlyHint: true, destructiveHint: false },
       },
       async ({ cursor, limit, level }) => {
+        if (!currentProjectPath()) {
+          const err = noProjectError("logs_read");
+          const output = { entries: [], nextCursor: "", hasMore: false, newErrors: 1 };
+          return {
+            content: [{ type: "text", text: JSON.stringify({ ...output, ...err }) }],
+            structuredContent: output,
+          };
+        }
         const output = readLogs({ cursor, limit, level });
         return {
           content: [{ type: "text", text: JSON.stringify(output) }],
@@ -436,7 +648,9 @@ export function buildFactory() {
           {
             uri: uri.href,
             mimeType: "application/json",
-            text: JSON.stringify(getHierarchy()),
+            text: JSON.stringify(
+              currentProjectPath() ? getHierarchy() : { error: NO_PROJECT_OPEN },
+            ),
           },
         ],
       }),
@@ -455,6 +669,27 @@ export function buildFactory() {
       async ({ session_id, anchor, replacement, disableCdnLoading }) => {
         return enqueue(async () => {
           const sessionId = session_id ?? "default";
+          const proj = currentProjectPath();
+          if (!proj) {
+            const err = noProjectError("code_patch");
+            const output = {
+              sessionId,
+              applied: false as const,
+              ready: false,
+              stats: emptyStats(),
+              diagnostics: [{ severity: "error", message: err.message, source: "code_patch" }],
+              mode: "refuse",
+              banner: null as string | null,
+              errors: 1,
+              warnings: 0,
+              circuitJsonLength: 0,
+              circuitJson: [] as unknown[],
+            };
+            return {
+              content: [{ type: "text", text: JSON.stringify({ ...output, ...err }) }],
+              structuredContent: output,
+            };
+          }
           const patched = applyAnchoredPatch(getCode(), anchor, replacement);
           if (!patched.ok) {
             const output = {
@@ -491,6 +726,7 @@ export function buildFactory() {
               "compile",
               `code_patch ok : ${compiled.stats.total} éléments, 0 erreur`,
             );
+            persistCurrent(proj, patched.code, compiled.circuitJson);
           } else {
             appendLog(
               "error",
@@ -530,6 +766,25 @@ export function buildFactory() {
         annotations: { readOnlyHint: true, destructiveHint: false },
       },
       async ({ session_id, domain, disableCdnLoading }) => {
+        const proj0 = currentProjectPath();
+        if (!proj0) {
+          const err = noProjectError("run_checks");
+          const output = {
+            sessionId: session_id ?? "default",
+            domain: domain ?? "all",
+            placementGreen: false,
+            routingAllowed: false,
+            blockReason: err.message,
+            counts: { netlist: 0, placement: 0, routing: 0, style: 0, total: 0 },
+            violations: [],
+            errors: 1,
+            warnings: 0,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify({ ...output, ...err }) }],
+            structuredContent: output,
+          };
+        }
         const sessionId = session_id ?? "default";
         const asked: CheckDomain = domain ?? "all";
         const code = getCode();
@@ -622,6 +877,32 @@ export function buildFactory() {
         annotations: { readOnlyHint: false, destructiveHint: true },
       },
       async ({ session_id, op, refdes, x, y, degrees, footprint, pin, net, disableCdnLoading }) => {
+        const projLive = currentProjectPath();
+        if (!projLive) {
+          const err = noProjectError("live_manage");
+          const output = {
+            sessionId: session_id ?? "default",
+            op: (op ?? "").trim(),
+            applied: false as const,
+            ready: false,
+            stats: emptyStats(),
+            diagnostics: [{ severity: "error", message: err.message, source: "live_manage" }],
+            mode: "refuse",
+            banner: null as string | null,
+            errors: 1,
+            warnings: 0,
+            circuitJsonLength: 0,
+            circuitJson: [] as unknown[],
+            code: null as string | null,
+            selection: null,
+            views: null as string[] | null,
+            message: err.message,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify({ ...output, ...err }) }],
+            structuredContent: output,
+          };
+        }
         const sessionId = session_id ?? "default";
         const asked = (op ?? "").trim();
 
@@ -860,6 +1141,7 @@ export function buildFactory() {
           });
           if (compiled.errors === 0) {
             appendLog("info", "compile", `live_manage ${asked} ok : ${compiled.stats.total} éléments, 0 erreur`);
+            persistCurrent(projLive, mutated.code, compiled.circuitJson);
           } else {
             appendLog(
               "error",
@@ -905,7 +1187,33 @@ export function buildFactory() {
       },
       async ({ session_id, source, disableCdnLoading }) => {
         const sessionId = session_id ?? "default";
-        const read = readPreview(source ?? "", { disableCdnLoading });
+        const projPrev = currentProjectPath();
+        // Override tests PCB_MCP_PREVIEW_DIR prioritaire (suites historiques), sinon dossier projet.
+        const previewOverride = (process.env.PCB_MCP_PREVIEW_DIR ?? "").trim();
+        const previewDirEff = previewOverride || (projPrev ? projectPreviewsDir(projPrev) : "");
+        if (!previewDirEff) {
+          const err = noProjectError("preview_screenshot");
+          const output = {
+            sessionId,
+            source: String(source ?? ""),
+            found: false,
+            dataUrl: null,
+            bytes: 0,
+            width: null,
+            height: null,
+            previewUrl: null,
+            updatedAt: null,
+            banner: null,
+            message: err.message,
+            errors: 1,
+            warnings: 0,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify({ ...output, ...err }) }],
+            structuredContent: output,
+          };
+        }
+        const read = readPreview(source ?? "", { dir: previewDirEff, disableCdnLoading });
         if (read.found) {
           appendLog("info", "export", `preview_screenshot ${read.source} ok : ${read.bytes} octets`);
         } else {
@@ -951,6 +1259,30 @@ export function buildFactory() {
       async ({ session_id, operations, disableCdnLoading }) => {
         return enqueue(async () => {
           const sessionId = session_id ?? "default";
+          const projBatch = currentProjectPath();
+          if (!projBatch) {
+            const err = noProjectError("batch_execute");
+            const output = {
+              sessionId,
+              applied: false as const,
+              ready: false,
+              failedOpIndex: null as number | null,
+              rolledBack: false,
+              stats: emptyStats(),
+              diagnostics: [{ severity: "error", message: err.message, source: "batch_execute" }],
+              mode: "refuse",
+              banner: null as string | null,
+              errors: 1,
+              warnings: 0,
+              circuitJsonLength: 0,
+              circuitJson: [] as unknown[],
+              code: null as string | null,
+            };
+            return {
+              content: [{ type: "text", text: JSON.stringify({ ...output, ...err }) }],
+              structuredContent: output,
+            };
+          }
           const ops = (operations ?? []) as BatchOp[];
           if (!Array.isArray(ops) || ops.length === 0) {
             const ready = getBoardState(sessionId).ready;
@@ -1052,6 +1384,7 @@ export function buildFactory() {
             "compile",
             `batch_execute ok : ${ops.length} ops, ${compiled.stats.total} éléments, 0 erreur`,
           );
+          persistCurrent(projBatch, batched.code, compiled.circuitJson);
           const output = {
             sessionId,
             applied: true as const,
@@ -1092,6 +1425,24 @@ export function buildFactory() {
         },
       },
       async ({ session_id, query, source, limit, disableCdnLoading }) => {
+        if (!currentProjectPath()) {
+          const err = noProjectError("search_parts");
+          const output = {
+            sessionId: session_id ?? "default",
+            query: (query ?? "").trim(),
+            source: (source ?? "jlcpcb").trim().toLowerCase(),
+            tsciSearch: "",
+            results: [],
+            banner: null as string | null,
+            message: err.message,
+            errors: 1,
+            warnings: 0,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify({ ...output, ...err }) }],
+            structuredContent: output,
+          };
+        }
         const sessionId = session_id ?? "default";
         const src = (source ?? "jlcpcb").trim().toLowerCase();
         if (src !== "jlcpcb" && src !== "lcsc") {
@@ -1173,6 +1524,33 @@ export function buildFactory() {
         },
       },
       async ({ session_id, project_name, disableCdnLoading }) => {
+        const projFab = currentProjectPath();
+        if (!projFab) {
+          const err = noProjectError("fab_export");
+          const output = {
+            sessionId: session_id ?? "default",
+            ready: false as const,
+            mode: "refuse",
+            banner: null as string | null,
+            errors: 1,
+            warnings: 0,
+            counts: { gerberFiles: 0, bomRows: 0, pnpRows: 0 },
+            gerberNames: [],
+            gerberPreview: "",
+            bomCsv: "",
+            pnpCsv: "",
+            kicad: { pcbBytes: 0, schBytes: 0, proBytes: 0, pcbPreview: "" },
+            kicadZip: { bytes: 0, previewUrl: "" },
+            fabZip: { bytes: 0, previewUrl: "" },
+            artifacts: [],
+            exportDir: "",
+            message: err.message,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify({ ...output, ...err }) }],
+            structuredContent: output,
+          };
+        }
         const sessionId = session_id ?? "default";
         const code = getCode();
         const compiled = await compileTsx(code, { disableCdnLoading });
@@ -1207,7 +1585,9 @@ export function buildFactory() {
           };
         }
         const fab = await exportFab(compiled.circuitJson as unknown[], {
-          projectName: project_name ?? "nia-demo",
+          projectName: (process.env.PCB_MCP_EXPORT_DIR ?? "").trim()
+            ? (project_name ?? "nia-demo")
+            : path.basename(projFab),
         });
         if (!fab.ok) {
           appendLog("error", "export", `fab_export impossible : ${fab.message}`);
@@ -1236,8 +1616,11 @@ export function buildFactory() {
           };
         }
         const out = fab as FabOk;
-        const base = fabExportBaseDir();
-        const dir = path.join(base, sanitizeSegment(sessionId), sanitizeSegment(out.projectName));
+        // Override tests PCB_MCP_EXPORT_DIR prioritaire (suites historiques), sinon <projet>/exports/<basename>.
+        const exportOverride = (process.env.PCB_MCP_EXPORT_DIR ?? "").trim();
+        const dir = exportOverride
+          ? path.join(exportOverride, sanitizeSegment(sessionId), sanitizeSegment(out.projectName))
+          : path.join(projectExportsDir(projFab), sanitizeSegment(out.projectName));
         fs.mkdirSync(dir, { recursive: true });
         fs.mkdirSync(path.join(dir, "gerbers"), { recursive: true });
         const artifacts = writeFabArtifacts(out, {

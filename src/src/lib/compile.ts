@@ -24,8 +24,9 @@ export const CDN_BANNER =
 
 export async function compileBoard(
   log: (msg: string) => void,
-  opts: { disableCdnLoading: boolean },
+  opts: { disableCdnLoading: boolean; code?: string },
 ): Promise<CompileResult> {
+  const fsMap = opts.code ? { [ENTRYPOINT]: opts.code } : initialFsMap();
   try {
     log(
       `worker : compile locale (blob-url bundlé, disableCdnLoading=${opts.disableCdnLoading})…`,
@@ -36,7 +37,7 @@ export async function compileBoard(
       platform: { partsEngineDisabled: true },
     } as never);
     await worker.executeWithFsMap({
-      fsMap: initialFsMap(),
+      fsMap,
       mainComponentPath: ENTRYPOINT,
     } as never);
     await worker.renderUntilSettled();
@@ -62,7 +63,7 @@ export async function compileBoard(
     // NOTE ticket #24 : passer l'objet fsMap ENTIER, jamais la string seule —
     // runTscircuitCode(string) la rebaptise "user-code.tsx" en interne, ce qui
     // casse mainComponentPath ("File not found main.tsx"). L'objet préserve "main.tsx".
-    const circuitJson = (await runTscircuitCode(initialFsMap(), {
+    const circuitJson = (await runTscircuitCode(fsMap, {
       mainComponentPath: ENTRYPOINT,
     })) as unknown[];
     log(`inline : ${circuitJson.length} éléments`);

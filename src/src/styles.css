@@ -750,6 +750,177 @@ code {
   margin: 6px 2px;
 }
 
+/* ---------- Accueil (Q2/Q16, DA zinc) ---------- */
+
+.home {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  justify-content: center;
+  background: var(--background);
+}
+
+.home-inner {
+  width: min(720px, 100%);
+  padding: 48px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.home-brand {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+}
+
+.home-brand h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.home-brand p {
+  margin: 4px 0 0;
+  color: var(--muted-fg);
+  font-size: 13px;
+}
+
+.home-tile {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+}
+
+.home-hero {
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  padding: 32px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  align-items: center;
+  text-align: center;
+  background: var(--card);
+}
+
+.home-bar {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--card);
+}
+
+.home-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.home-template {
+  display: flex;
+  gap: 12px;
+  color: var(--muted-fg);
+  font-size: 12.5px;
+}
+
+.home-template label {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  cursor: pointer;
+}
+
+.home-template input {
+  accent-color: var(--primary);
+}
+
+.home-error {
+  margin: 0;
+  color: var(--destructive-fg);
+  background: var(--destructive);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.home-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.home-item {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  background: var(--card);
+}
+
+.home-current {
+  border-color: var(--ring);
+}
+
+.home-open {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  color: var(--foreground);
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 4px;
+}
+
+.home-open:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.home-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.home-path {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.home-meta {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  flex: none;
+}
+
+.home-hint {
+  margin: 0;
+  color: var(--muted-fg);
+  font-size: 13px;
+  text-align: center;
+}
+
 /* ---------- Divers ---------- */
 
 @media (max-width: 860px) {
