@@ -4,19 +4,28 @@
   "version": "0.1.0",
   "identifier": "dev.nia.tscircuit-studio",
   "build": {
-    "frontendDist": "../src"
+    "frontendDist": "../src/dist",
+    "devUrl": "http://localhost:1420"
   },
   "app": {
     "withGlobalTauri": true,
     "windows": [
       {
         "title": "NIATSCIRCUIT Studio",
-        "width": 900,
-        "height": 650
+        "width": 1220,
+        "height": 820
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self' 'wasm-unsafe-eval'",
+        "worker-src": "'self' blob:",
+        "img-src": "'self' asset: http://asset.localhost blob: data:",
+        "style-src": "'self' 'unsafe-inline'",
+        "connect-src": "ipc: http://ipc.localhost",
+        "font-src": "'self' data:"
+      }
     }
   },
   "bundle": {

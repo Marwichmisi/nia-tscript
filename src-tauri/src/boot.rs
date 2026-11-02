@@ -359,10 +359,12 @@ pub fn is_real_sidecar_bin(path: &Path) -> bool {
 
 /// Spawn détaché : `bin serve --port <port>`, token via env (jamais en argv,
 /// jamais loggé), stdout neutralisée, stderr héritée (logs serveur).
+/// `preview_dir` partagé WebView ↔ MCP (#15) via `PCB_MCP_PREVIEW_DIR`.
 pub fn spawn_sidecar(
     bin: &Path,
     port: u16,
     token: &str,
+    preview_dir: &Path,
 ) -> io::Result<std::process::Child> {
     if port == 0 {
         return Err(io::Error::new(
@@ -381,6 +383,7 @@ pub fn spawn_sidecar(
         .arg("--port")
         .arg(port.to_string())
         .env("PCB_MCP_TOKEN", token)
+        .env("PCB_MCP_PREVIEW_DIR", preview_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
@@ -556,8 +559,9 @@ mod tests {
     #[test]
     fn spawn_rejects_invalid_args() {
         let bin = PathBuf::from("/inexistant/pcb-mcp");
-        assert!(super::spawn_sidecar(&bin, 0, "tok").is_err());
-        assert!(super::spawn_sidecar(&bin, 4123, "").is_err());
+        let dir = std::env::temp_dir();
+        assert!(super::spawn_sidecar(&bin, 0, "tok", &dir).is_err());
+        assert!(super::spawn_sidecar(&bin, 4123, "", &dir).is_err());
     }
 
     #[test]
@@ -585,7 +589,8 @@ mod tests {
         let port = super::pick_free_port().expect("port libre");
         let token = super::generate_token();
         let url = super::mcp_url(port);
-        let mut child = super::spawn_sidecar(&bin, port, &token)
+        let preview_dir = std::env::temp_dir().join(format!("nia-preview-e2e-{}", std::process::id()));
+        let mut child = super::spawn_sidecar(&bin, port, &token, &preview_dir)
             .expect("spawn sidecar");
         let ready = super::wait_ready(&url, &token, Duration::from_secs(15));
         // Nettoyage même en échec (pas d'orphelin dans la suite de tests).

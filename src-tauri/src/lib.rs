@@ -1,4 +1,5 @@
 mod boot;
+mod preview;
 
 use std::net::TcpListener;
 use std::sync::{
@@ -54,6 +55,36 @@ fn get_boot_state(state: tauri::State<'_, Arc<Mutex<BootState>>>) -> BootState {
     state.lock().expect("boot state").clone()
 }
 
+/// Screenshot agent (#15) : la WebView dépose le PNG capturé
+/// (canvas/SVG → PNG) dans le dossier partagé avec le sidecar MCP.
+/// Jamais d'image inventée côté MCP : sans fichier, `preview_screenshot`
+/// répond « ouvre l'app ».
+#[tauri::command]
+fn save_screenshot(
+    app: tauri::AppHandle,
+    source: String,
+    data_url: String,
+    width: u32,
+    height: u32,
+) -> Result<preview::SavedPreview, String> {
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("cache_dir indisponible: {e}"))?;
+    let dir = preview::preview_dir(&cache);
+    preview::write_preview(&dir, &source, &data_url, width, height)
+}
+
+/// Dossier previews partagé (debug UI).
+#[tauri::command]
+fn get_preview_dir(app: tauri::AppHandle) -> Result<String, String> {
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("cache_dir indisponible: {e}"))?;
+    Ok(preview::preview_dir(&cache).to_string_lossy().to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let boot_state = Arc::new(Mutex::new(BootState::default()));
@@ -103,7 +134,11 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_boot_state])
+        .invoke_handler(tauri::generate_handler![
+            get_boot_state,
+            save_screenshot,
+            get_preview_dir
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -137,12 +172,14 @@ fn boot_or_attach(app: &tauri::AppHandle) -> Result<BootState, String> {
     // pas être masqué). Le repli stub #9 n'a lieu que si le binaire est
     // absent (dev sans `bun build --compile`).
     if let Some(bin) = boot::find_sidecar_bin() {
+        let preview_dir = preview::preview_dir(&cache_dir);
+        let _ = std::fs::create_dir_all(&preview_dir);
         let mut last_err = String::new();
         for attempt in 1..=3u32 {
             let port = boot::pick_free_port()
                 .map_err(|e| format!("port libre indisponible: {e}"))?;
             let token = boot::generate_token();
-            match boot::spawn_sidecar(&bin, port, &token) {
+            match boot::spawn_sidecar(&bin, port, &token, &preview_dir) {
                 Ok(child) => {
                     let url = boot::mcp_url(port);
                     if boot::wait_ready(&url, &token, Duration::from_secs(10)) {

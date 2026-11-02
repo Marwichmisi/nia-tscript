@@ -17,6 +17,7 @@ import {
   REFUSED_LIVE_OPS,
 } from "./live.js";
 import { applyAnchoredPatch } from "./patch.js";
+import { readPreview } from "./preview.js";
 import { enqueue } from "./queue.js";
 import {
   appendLog,
@@ -186,6 +187,33 @@ const LiveManageOutput = z.object({
     .nullable(),
   views: z.array(z.string()).nullable(),
   message: z.string().nullable(),
+});
+
+const PreviewScreenshotInput = z.object({
+  session_id: z.string().optional().describe("Session mono-board (défaut: default)"),
+  source: z
+    .string()
+    .describe("schematic_2d | pcb_2d | pcb_3d (alias prototype schematique_2d accepté)"),
+  disableCdnLoading: z
+    .boolean()
+    .optional()
+    .describe(" true = offline strict (bandeau si dégradation réseau)"),
+});
+
+const PreviewScreenshotOutput = z.object({
+  sessionId: z.string(),
+  source: z.string(),
+  found: z.boolean(),
+  dataUrl: z.string().nullable(),
+  bytes: z.number(),
+  width: z.number().nullable(),
+  height: z.number().nullable(),
+  previewUrl: z.string().nullable(),
+  updatedAt: z.string().nullable(),
+  banner: z.string().nullable(),
+  message: z.string().nullable(),
+  errors: z.number(),
+  warnings: z.number(),
 });
 
 export function buildFactory() {
@@ -698,6 +726,46 @@ export function buildFactory() {
             structuredContent: output,
           };
         });
+      },
+    );
+
+    server.registerTool(
+      "preview_screenshot",
+      {
+        title: "Screenshot preview agent",
+        description:
+          "Lit le dernier screenshot PNG déposé par la WebView (onglets Schéma/PCB/3D, compile partagée) : retourne base64 + taille + lien preview locale file://. Absent → message explicite « ouvre l'app ». Jamais d'image inventée ; offline strict → bandeau.",
+        inputSchema: PreviewScreenshotInput,
+        outputSchema: PreviewScreenshotOutput,
+        annotations: { readOnlyHint: true, destructiveHint: false },
+      },
+      async ({ session_id, source, disableCdnLoading }) => {
+        const sessionId = session_id ?? "default";
+        const read = readPreview(source ?? "", { disableCdnLoading });
+        if (read.found) {
+          appendLog("info", "export", `preview_screenshot ${read.source} ok : ${read.bytes} octets`);
+        } else {
+          appendLog("warn", "export", `preview_screenshot ${String(source)} introuvable : ${read.message ?? "inconnu"}`);
+        }
+        const output = {
+          sessionId,
+          source: String(read.source),
+          found: read.found,
+          dataUrl: read.dataUrl,
+          bytes: read.bytes,
+          width: read.width,
+          height: read.height,
+          previewUrl: read.previewUrl,
+          updatedAt: read.updatedAt,
+          banner: read.banner,
+          message: read.message,
+          errors: read.errors,
+          warnings: read.warnings,
+        };
+        return {
+          content: [{ type: "text", text: JSON.stringify(output) }],
+          structuredContent: output,
+        };
       },
     );
 
