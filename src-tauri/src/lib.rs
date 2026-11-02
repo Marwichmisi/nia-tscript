@@ -89,27 +89,21 @@ fn get_boot_state(state: tauri::State<'_, Arc<Mutex<BootState>>>) -> BootState {
 /// répond « ouvre l'app ».
 #[tauri::command]
 fn save_screenshot(
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
     source: String,
     data_url: String,
     width: u32,
     height: u32,
 ) -> Result<preview::SavedPreview, String> {
-    let cache = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| format!("cache_dir indisponible: {e}"))?;
+    let cache = boot::base_cache_dir().ok_or("cache_dir indisponible")?;
     let dir = preview::preview_dir(&cache);
     preview::write_preview(&dir, &source, &data_url, width, height)
 }
 
 /// Dossier previews partagé (debug UI).
 #[tauri::command]
-fn get_preview_dir(app: tauri::AppHandle) -> Result<String, String> {
-    let cache = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| format!("cache_dir indisponible: {e}"))?;
+fn get_preview_dir(_app: tauri::AppHandle) -> Result<String, String> {
+    let cache = boot::base_cache_dir().ok_or("cache_dir indisponible")?;
     Ok(preview::preview_dir(&cache).to_string_lossy().to_string())
 }
 
@@ -135,13 +129,14 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .manage(boot_state)
-        .on_window_event(|win, event| {
+        .on_window_event(|_win, event| {
             // §5.2.6 : à la fermeture, tuer le sidecar (#10) puis supprimer
-            // le lockfile best-effort (token éphémère jamais réutilisé ;
-            // le stale-lock couvre les crashs).
+            // le lockfile best-effort (même base que l'écriture : base_cache_dir,
+            // cf. bug #25 — app_cache_dir() ajoute l'identifiant et rendait
+            // le pont aveugle).
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 kill_sidecar();
-                if let Ok(cache) = win.app_handle().path().app_cache_dir() {
+                if let Some(cache) = boot::base_cache_dir() {
                     let _ = std::fs::remove_file(boot::lockfile_path(&cache));
                 }
             }
@@ -189,10 +184,11 @@ fn boot_or_attach(app: &tauri::AppHandle) -> Result<BootState, String> {
     } else {
         eprintln!("[boot] pont MCP : {bridge_path}");
     }
-    let cache_dir = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| format!("cache_dir indisponible: {e}"))?;
+    // Lockfile au cache de BASE (cf. boot::base_cache_dir) : le pont Node,
+    // processus externe, calcule le même chemin. app_cache_dir() ajouterait
+    // l'identifiant et rendrait le pont aveugle (bug #25 phase 3).
+    // Les previews suivent le même dossier (cohérence WebView ↔ sidecar).
+    let cache_dir = boot::base_cache_dir().ok_or("cache_dir indisponible")?;
     let lock_path = boot::lockfile_path(&cache_dir);
 
     // 2. Stale-lock : s'attacher si l'instance propriétaire est joignable.

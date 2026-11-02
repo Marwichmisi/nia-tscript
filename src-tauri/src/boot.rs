@@ -57,6 +57,44 @@ pub fn lockfile_path(cache_dir: &Path) -> PathBuf {
     cache_dir.join(LOCKFILE_REL)
 }
 
+/// Dossier cache de BASE (sans identifiant app), même sémantique que
+/// `dirs::cache_dir` et que le pont (`bridge/lib.mjs`, `defaultLockfilePath`).
+/// Le lockfile `niatscircuit/mcp.json` est lu par un processus externe (le
+/// pont Node), donc les deux côtés doivent calculer le même chemin.
+/// `app.path().app_cache_dir()` de Tauri ajoute l'identifiant
+/// (`dev.nia.tscircuit-studio`) — inutilisable ici : c'était le bug #25
+/// (pont aveugle, `-32000` malgré l'app ouverte).
+/// Linux : `$XDG_CACHE_HOME` sinon `~/.cache` ; macOS : `~/Library/Caches` ;
+/// Windows : `%LOCALAPPDATA%` sinon `~/AppData/Local`.
+pub fn base_cache_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME")?;
+        return Some(PathBuf::from(home).join("Library/Caches"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(dir) = std::env::var_os("LOCALAPPDATA") {
+            if !dir.is_empty() {
+                return Some(PathBuf::from(dir));
+            }
+        }
+        let home =
+            std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+        return Some(PathBuf::from(home).join("AppData/Local"));
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
+            if !dir.is_empty() {
+                return Some(PathBuf::from(dir));
+            }
+        }
+        let home = std::env::var_os("HOME")?;
+        return Some(PathBuf::from(home).join(".cache"));
+    }
+}
+
 pub fn build_lock(port: u16, token: String) -> McpLock {
     McpLock {
         port,
