@@ -59,7 +59,10 @@ export async function compileBoard(
 
   try {
     log("repli : compile inline (requiert réseau CDN)…");
-    const circuitJson = (await runTscircuitCode(initialFsMap()[ENTRYPOINT]!, {
+    // NOTE ticket #24 : passer l'objet fsMap ENTIER, jamais la string seule —
+    // runTscircuitCode(string) la rebaptise "user-code.tsx" en interne, ce qui
+    // casse mainComponentPath ("File not found main.tsx"). L'objet préserve "main.tsx".
+    const circuitJson = (await runTscircuitCode(initialFsMap(), {
       mainComponentPath: ENTRYPOINT,
     })) as unknown[];
     log(`inline : ${circuitJson.length} éléments`);
