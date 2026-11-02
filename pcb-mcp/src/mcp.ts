@@ -2,11 +2,15 @@
 // Une seule factory pour les deux eras : moderne 2026-07-28 + fallback
 // legacy initialize stateless (createMcpHandler défaut `legacy: 'stateless'`).
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
+import fs from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { emptyStats } from "./board.js";
 import { runDomainChecks, runPlacementGate, type CheckDomain } from "./checks.js";
 import { compileTsx } from "./compile.js";
 import { applyBatch, BATCH_MAX_OPS, type BatchOp } from "./batch.js";
+import { exportFab, fabExportBaseDir, sanitizeSegment, writeFabArtifacts, type FabOk } from "./fab.js";
 import {
   applyMove,
   applyReassignNet,
@@ -20,6 +24,7 @@ import {
 import { applyAnchoredPatch } from "./patch.js";
 import { readPreview } from "./preview.js";
 import { enqueue } from "./queue.js";
+import { searchParts } from "./sourcing.js";
 import {
   appendLog,
   getBoardState,
@@ -285,6 +290,94 @@ const BatchExecuteOutput = z.object({
   circuitJsonLength: z.number(),
   circuitJson: z.array(z.any()),
   code: z.string().nullable(),
+});
+
+const SearchPartsInput = z.object({
+  session_id: z.string().optional().describe("Session mono-board (défaut: default)"),
+  query: z.string().describe("Nom, valeur ou réf LCSC (ex 10k, 0402, C21190, RP2040)"),
+  source: z
+    .string()
+    .optional()
+    .describe("Source catalogue (défaut: jlcpcb ; alias lcsc ; digikey/mouser → V2)"),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(10)
+    .optional()
+    .describe("1..10, défaut 5"),
+  disableCdnLoading: z
+    .boolean()
+    .optional()
+    .describe(" true = offline strict (bandeau si dégradation réseau)"),
+});
+
+const SearchPartsOutput = z.object({
+  sessionId: z.string(),
+  query: z.string(),
+  source: z.string(),
+  tsciSearch: z.string(),
+  results: z.array(
+    z.object({
+      lcsc: z.string(),
+      mfr: z.string(),
+      package: z.string(),
+      description: z.string(),
+      stock: z.number().nullable(),
+      footprint: z.string(),
+      footprinterString: z.string().nullable(),
+      footprintSource: z.string(),
+      tsxSnippet: z.string(),
+      tsciImport: z.string(),
+    }),
+  ),
+  banner: z.string().nullable(),
+  message: z.string().nullable(),
+  errors: z.number(),
+  warnings: z.number(),
+});
+
+const FabExportInput = z.object({
+  session_id: z.string().optional().describe("Session mono-board (défaut: default)"),
+  project_name: z
+    .string()
+    .optional()
+    .describe("Nom projet pour les fichiers KiCad (défaut: nia-demo)"),
+  disableCdnLoading: z
+    .boolean()
+    .optional()
+    .describe(" true = offline strict (bandeau si dégradation réseau)"),
+});
+
+const FabExportOutput = z.object({
+  sessionId: z.string(),
+  ready: z.boolean(),
+  mode: z.string(),
+  banner: z.string().nullable(),
+  errors: z.number(),
+  warnings: z.number(),
+  counts: z.object({
+    gerberFiles: z.number(),
+    bomRows: z.number(),
+    pnpRows: z.number(),
+  }),
+  gerberNames: z.array(z.string()),
+  gerberPreview: z.string(),
+  bomCsv: z.string(),
+  pnpCsv: z.string(),
+  kicad: z.object({
+    pcbBytes: z.number(),
+    schBytes: z.number(),
+    proBytes: z.number(),
+    pcbPreview: z.string(),
+  }),
+  kicadZip: z.object({ bytes: z.number(), previewUrl: z.string() }),
+  fabZip: z.object({ bytes: z.number(), previewUrl: z.string() }),
+  artifacts: z.array(
+    z.object({ name: z.string(), bytes: z.number(), previewUrl: z.string() }),
+  ),
+  exportDir: z.string(),
+  message: z.string().nullable(),
 });
 
 export function buildFactory() {
@@ -980,6 +1073,219 @@ export function buildFactory() {
             structuredContent: output,
           };
         });
+      },
+    );
+
+    server.registerTool(
+      "search_parts",
+      {
+        title: "Sourcing JLCPCB-first + footprint",
+        description:
+          "Recherche une pièce JLCPCB (même source que `tsci search --jlcpcb`) : réf LCSC + footprint utilisable dans le TSX (footprinter_string IoU ≥ 95 % sinon fallback package validé par le DSL footprinter local). Empreinte manquante → DSL footprinter généré et compilé. Équivalent CLI : `tsci search --jlcpcb \"<query>\"` / `tsci import \"<Cxxxx>\" --jlcpcb`. Offline strict → refus explicite, rien d'inventé.",
+        inputSchema: SearchPartsInput,
+        outputSchema: SearchPartsOutput,
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+      },
+      async ({ session_id, query, source, limit, disableCdnLoading }) => {
+        const sessionId = session_id ?? "default";
+        const src = (source ?? "jlcpcb").trim().toLowerCase();
+        if (src !== "jlcpcb" && src !== "lcsc") {
+          const message =
+            `source "${source}" non supportée au MVP (sourcing JLCPCB-first, décision carte #6) : ` +
+            `multi-sourcing DigiKey/Mouser différé V2 — utilisez source=jlcpcb (ou alias lcsc)`;
+          appendLog("error", "export", `search_parts source refusée : ${source}`);
+          const output = {
+            sessionId,
+            query: (query ?? "").trim(),
+            source: src,
+            tsciSearch: `tsci search --jlcpcb "${(query ?? "").trim()}"`,
+            results: [],
+            banner: null as string | null,
+            message,
+            errors: 1,
+            warnings: 0,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        }
+        const found = await searchParts(query ?? "", { limit: limit ?? 5, disableCdnLoading });
+        if (!found.ok) {
+          appendLog("error", "export", `search_parts "${query ?? ""}" impossible : ${found.message}`);
+          const output = {
+            sessionId,
+            query: found.query,
+            source: src,
+            tsciSearch: found.tsciSearch,
+            results: [],
+            banner: found.banner,
+            message: found.message,
+            errors: 1,
+            warnings: 0,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        }
+        appendLog(
+          "info",
+          "export",
+          `search_parts "${found.query}" : ${found.results.length} résultat(s) JLCPCB`,
+        );
+        const output = {
+          sessionId,
+          query: found.query,
+          source: src,
+          tsciSearch: found.tsciSearch,
+          results: found.results,
+          banner: null as string | null,
+          message: null as string | null,
+          errors: 0,
+          warnings: 0,
+        };
+        return {
+          content: [{ type: "text", text: JSON.stringify(output) }],
+          structuredContent: output,
+        };
+      },
+    );
+
+    server.registerTool(
+      "fab_export",
+      {
+        title: "Exports fab V1 (gerbers + PnP + BOM + kicad_zip)",
+        description:
+          "Exporte la board courante en un geste : gerbers RS-274X + Excellon, BOM CSV, pick-and-place CSV et projet KiCad (.kicad_pcb + .kicad_sch + .kicad_pro, silencieux) + zips kicad_project.zip et fab_upload.zip (JLCPCB). Compile d'abord le TSX courant ; compile en erreur → aucun fichier inventé.",
+        inputSchema: FabExportInput,
+        outputSchema: FabExportOutput,
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      },
+      async ({ session_id, project_name, disableCdnLoading }) => {
+        const sessionId = session_id ?? "default";
+        const code = getCode();
+        const compiled = await compileTsx(code, { disableCdnLoading });
+        if (compiled.errors !== 0) {
+          appendLog(
+            "error",
+            "export",
+            `fab_export impossible : compile en erreur — ${compiled.diagnostics[0]?.message ?? "inconnu"}`,
+          );
+          const output = {
+            sessionId,
+            ready: false as const,
+            mode: "echec",
+            banner: compiled.banner,
+            errors: compiled.errors,
+            warnings: compiled.warnings,
+            counts: { gerberFiles: 0, bomRows: 0, pnpRows: 0 },
+            gerberNames: [],
+            gerberPreview: "",
+            bomCsv: "",
+            pnpCsv: "",
+            kicad: { pcbBytes: 0, schBytes: 0, proBytes: 0, pcbPreview: "" },
+            kicadZip: { bytes: 0, previewUrl: "" },
+            fabZip: { bytes: 0, previewUrl: "" },
+            artifacts: [],
+            exportDir: "",
+            message: `compile en erreur : ${compiled.diagnostics[0]?.message ?? "inconnu"} — corrigez via code_patch avant tout export`,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        }
+        const fab = await exportFab(compiled.circuitJson as unknown[], {
+          projectName: project_name ?? "nia-demo",
+        });
+        if (!fab.ok) {
+          appendLog("error", "export", `fab_export impossible : ${fab.message}`);
+          const output = {
+            sessionId,
+            ready: false as const,
+            mode: "echec",
+            banner: compiled.banner,
+            errors: 1,
+            warnings: 0,
+            counts: { gerberFiles: 0, bomRows: 0, pnpRows: 0 },
+            gerberNames: [],
+            gerberPreview: "",
+            bomCsv: "",
+            pnpCsv: "",
+            kicad: { pcbBytes: 0, schBytes: 0, proBytes: 0, pcbPreview: "" },
+            kicadZip: { bytes: 0, previewUrl: "" },
+            fabZip: { bytes: 0, previewUrl: "" },
+            artifacts: [],
+            exportDir: "",
+            message: fab.message,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        }
+        const out = fab as FabOk;
+        const base = fabExportBaseDir();
+        const dir = path.join(base, sanitizeSegment(sessionId), sanitizeSegment(out.projectName));
+        fs.mkdirSync(dir, { recursive: true });
+        fs.mkdirSync(path.join(dir, "gerbers"), { recursive: true });
+        const artifacts = writeFabArtifacts(out, {
+          dir,
+          writeFile: (p, content) => fs.writeFileSync(p, content),
+          toFileUrl: (p) => pathToFileURL(p).href,
+          join: (...parts) => path.join(...parts),
+        });
+        const byName = (n: string) => artifacts.find((a) => a.name === n);
+        appendLog(
+          "info",
+          "export",
+          `fab_export ok : ${out.counts.gerberFiles} gerbers, BOM ${out.counts.bomRows} lignes, PnP ${out.counts.pnpRows} lignes, kicad silencieux → ${dir}`,
+        );
+        const output = {
+          sessionId,
+          ready: true as const,
+          mode: compiled.mode,
+          banner: compiled.banner,
+          errors: 0,
+          warnings: compiled.warnings,
+          counts: out.counts,
+          gerberNames: out.gerberNames,
+          gerberPreview: out.gerberPreview,
+          bomCsv: out.bomCsv,
+          pnpCsv: out.pnpCsv,
+          kicad: {
+            pcbBytes: Buffer.byteLength(out.kicadPcb),
+            schBytes: Buffer.byteLength(out.kicadSch),
+            proBytes: Buffer.byteLength(out.kicadPro),
+            pcbPreview: out.kicadPcbPreview,
+          },
+          kicadZip: {
+            bytes: out.kicadZipBytes,
+            previewUrl: byName("kicad_project.zip")?.previewUrl ?? "",
+          },
+          fabZip: {
+            bytes: out.fabZipBytes,
+            previewUrl: byName("fab_upload.zip")?.previewUrl ?? "",
+          },
+          artifacts,
+          exportDir: dir,
+          message: null as string | null,
+        };
+        return {
+          content: [{ type: "text", text: JSON.stringify(output) }],
+          structuredContent: output,
+        };
       },
     );
 
