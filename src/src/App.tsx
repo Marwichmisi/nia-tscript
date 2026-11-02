@@ -68,6 +68,24 @@ function initialCollapsed(): boolean {
   return window.localStorage.getItem("nia.term.collapsed") === "1";
 }
 
+/** Hauteur du conteneur viewer (ResizeObserver) pour le PCBViewer,
+ *  qui ne mesure que sa largeur seul (prop height, défaut 600). */
+function useElementHeight(ref: React.RefObject<HTMLElement | null>): number {
+  const [h, setH] = useState(0);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    setH(Math.round(el.getBoundingClientRect().height));
+    const ro = new ResizeObserver((entries) => {
+      const rect = entries[0]?.contentRect;
+      if (rect) setH(Math.round(rect.height));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ref]);
+  return h;
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>(() => initialTab());
   const [termTab, setTermTab] = useState<TermTab>(() => initialTermTab());
@@ -155,6 +173,7 @@ export default function App() {
   const stats = computeStats(circuitJson);
   const ready = mode === "worker-blob-local" || mode === "worker-blob-local-nocdn";
   const compiling = mode === "compilation…";
+  const viewerHeight = useElementHeight(viewRef);
 
   async function onShot() {
     setShotErr(null);
@@ -340,11 +359,14 @@ export default function App() {
             </div>
           ) : (
             <ViewerErrorBoundary tabName={tab}>
-              {tab === "schema" ? (
-                <SchematicViewer circuitJson={circuitJson as never} />
-              ) : tab === "pcb" ? (
-                <PCBViewer circuitJson={circuitJson as never} />
-              ) : (
+                {tab === "schema" ? (
+                  <SchematicViewer circuitJson={circuitJson as never} />
+                ) : tab === "pcb" ? (
+                  <PCBViewer
+                    circuitJson={circuitJson as never}
+                    height={viewerHeight > 0 ? viewerHeight : undefined}
+                  />
+                ) : (
                 <CadViewer circuitJson={circuitJson as never} />
               )}
             </ViewerErrorBoundary>

@@ -396,6 +396,13 @@ code {
   flex-direction: column;
 }
 
+/* Radix garde les panneaux déjà visités montés avec [hidden] ;
+   sans cette règle, le display:flex ci-dessus les rend tous visibles
+   et ils écrasent le panneau actif. */
+.terminal-body .ui-tabs-content[hidden] {
+  display: none;
+}
+
 .term-count {
   margin-left: 2px;
 }
