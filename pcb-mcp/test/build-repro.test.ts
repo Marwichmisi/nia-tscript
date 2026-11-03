@@ -13,6 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { verifySidecar, MIN_SIDECAR_BYTES } from "../scripts/verify-sidecar.mjs";
+import { PEER_ZOD3_TARGETS, ensurePeerZod3 } from "../scripts/fix-peer-zod.mjs";
 
 const repoRoot = path.resolve(import.meta.dir, "..", "..");
 const read = (rel: string) => fs.readFileSync(path.join(repoRoot, rel), "utf8");
@@ -62,14 +63,11 @@ describe("#40 — gates bun test + cargo test + types avant build", () => {
     expect(yaml).toContain("bun test");
     expect(yaml).toContain("cargo test");
     expect(yaml).toContain("typecheck");
-    // Ordre : les gates précèdent le build (positions dans le fichier).
-    const gates = Math.max(
-      yaml.indexOf("bun test"),
-      yaml.indexOf("cargo test"),
-      yaml.indexOf("typecheck"),
-    );
-    expect(gates).toBeGreaterThan(-1);
-    expect(yaml.indexOf("scripts/build.mjs")).toBeGreaterThan(gates);
+    // Ordre : build hôte puis gates (bun test avec lock tmp, cargo, types),
+    // puis job sidecar multi-triples après les gates (needs: gates).
+    expect(yaml.indexOf("scripts/build.mjs")).toBeLessThan(yaml.indexOf("bun test"));
+    expect(yaml.indexOf("needs: gates")).toBeGreaterThan(yaml.indexOf("cargo test"));
+    expect(yaml).toContain("NIATSCIRCUIT_MCP_LOCK");
   });
 
   test("release.yml : versions gelées + gates + vérification sidecar après build", () => {
@@ -79,6 +77,7 @@ describe("#40 — gates bun test + cargo test + types avant build", () => {
     expect(yaml).toContain("cargo test");
     expect(yaml).toContain("typecheck");
     expect(yaml).toContain("verify-sidecar");
+    expect(yaml).toContain("NIATSCIRCUIT_MCP_LOCK");
   });
 });
 
@@ -151,5 +150,62 @@ describe("#40 — lockfile MCP reflétant les dépendances réelles", () => {
     const ranges = { ...pkg.dependencies, ...pkg.devDependencies };
     const floating = Object.entries(ranges).filter(([, r]) => r.trim() === "latest");
     expect(floating).toEqual([]);
+  });
+
+  test("overrides ciblés zod 3 déclarés (contrats peer tscircuit honorés)", () => {
+    const pkg = JSON.parse(read("pcb-mcp/package.json")) as {
+      overrides?: Record<string, Record<string, string>>;
+    };
+    for (const target of [
+      "@tscircuit/eval",
+      "@tscircuit/circuit-json-util",
+      "@tscircuit/props",
+      "@tscircuit/modelprinter",
+    ]) {
+      expect(pkg.overrides?.[target]?.["zod"]?.startsWith("3.")).toBe(true);
+    }
+  });
+});
+
+describe("#40 — pairs tscircuit à peer zod 3 résolvent zod 3 (fix-peer-zod)", () => {
+  test("eval + circuit-json-util + props + modelprinter : zod imbriqué major 3", () => {
+    for (const p of PEER_ZOD3_TARGETS) {
+      const pkgPath = path.join(
+        repoRoot,
+        "pcb-mcp",
+        "node_modules",
+        p,
+        "node_modules",
+        "zod",
+        "package.json",
+      );
+      const v = (JSON.parse(fs.readFileSync(pkgPath, "utf8")) as { version: string }).version;
+      expect(v.startsWith("3.")).toBe(true);
+    }
+  });
+
+  test("ensurePeerZod3 : répare un arbre factice (copie vérifiée, idempotent)", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nia-peerzod-"));
+    const nm = path.join(dir, "node_modules");
+    const srcZod = path.join(nm, "@tscircuit", "core", "node_modules", "zod");
+    fs.mkdirSync(srcZod, { recursive: true });
+    fs.writeFileSync(
+      path.join(srcZod, "package.json"),
+      JSON.stringify({ name: "zod", version: "3.25.76" }),
+    );
+    const evalDir = path.join(nm, "@tscircuit", "eval");
+    fs.mkdirSync(evalDir, { recursive: true });
+    for (const t of ["circuit-json-util", "props", "modelprinter"]) {
+      fs.mkdirSync(path.join(nm, "@tscircuit", t), { recursive: true });
+    }
+    const first = ensurePeerZod3(nm);
+    expect(first.fixed.length).toBe(4);
+    const v = JSON.parse(
+      fs.readFileSync(path.join(evalDir, "node_modules", "zod", "package.json"), "utf8"),
+    ) as { version: string };
+    expect(v.version).toBe("3.25.76");
+    const second = ensurePeerZod3(nm);
+    expect(second.fixed).toEqual([]);
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });

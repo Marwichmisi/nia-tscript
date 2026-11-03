@@ -44,8 +44,16 @@ jobs:
         working-directory: pcb-mcp
         run: bun install --frozen-lockfile
 
+      - name: build sidecar hôte (requis par les tests matrice §8.2.1)
+        working-directory: pcb-mcp
+        run: bun scripts/build.mjs
+
       - name: pcb-mcp — tests
         working-directory: pcb-mcp
+        env:
+          # Recette impl-39 : sans lock tmp, les suites dépendantes du lock
+          # rapportent NO_PROJECT_OPEN au lieu de tester le vrai pont.
+          NIATSCIRCUIT_MCP_LOCK: ${{ runner.temp }}/nia-test-mcp.json
         run: bun test
 
       - name: pcb-mcp — vérification de types

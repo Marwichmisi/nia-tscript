@@ -44,12 +44,18 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
 
-      - name: pcb-mcp — install gelé + tests + types
-        # Typecheck non bloquant, voir commentaire dans ci.yml (dette #40 :
-        # sources .ts brutes du transitif @tscircuit/fanout-solver).
+      - name: pcb-mcp — install gelé + build hôte + tests + types
+        # Build hôte requis par les tests matrice §8.2.1 ; typecheck non
+        # bloquant, voir commentaire dans ci.yml (dette #40 : sources .ts
+        # brutes du transitif @tscircuit/fanout-solver).
         working-directory: pcb-mcp
+        env:
+          # Recette impl-39 : sans lock tmp, les suites dépendantes du lock
+          # rapportent NO_PROJECT_OPEN au lieu de tester le vrai pont.
+          NIATSCIRCUIT_MCP_LOCK: ${{ runner.temp }}/nia-test-mcp.json
         run: |
           bun install --frozen-lockfile
+          bun scripts/build.mjs
           bun test
           bun run typecheck || echo "::warning::typecheck pcb-mcp non bloquant (dette #40)"
 
