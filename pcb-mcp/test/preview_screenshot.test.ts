@@ -71,12 +71,12 @@ beforeAll(async () => {
   previewDir = fs.mkdtempSync(path.join(os.tmpdir(), "nia-preview-mcp-"));
   process.env.PCB_MCP_PREVIEW_DIR = previewDir;
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "nia-preview-lock-"));
-  (globalThis as Record<string, string | undefined>).__niaSavedLock = process.env.NIATSCIRCUIT_MCP_LOCK;
-  (globalThis as Record<string, string | undefined>).__niaSavedProjectsFile =
+  (globalThis as unknown as Record<string, string | undefined>).__niaSavedLock = process.env.NIATSCIRCUIT_MCP_LOCK;
+  (globalThis as unknown as Record<string, string | undefined>).__niaSavedProjectsFile =
     process.env.NIATSCIRCUIT_PROJECTS_FILE;
   process.env.NIATSCIRCUIT_MCP_LOCK = path.join(tmpRoot, "mcp.json");
   process.env.NIATSCIRCUIT_PROJECTS_FILE = path.join(tmpRoot, "projects.json");
-  (globalThis as Record<string, string>).__niaPreviewTmpRoot = tmpRoot;
+  (globalThis as unknown as Record<string, string>).__niaPreviewTmpRoot = tmpRoot;
   PORT = await freePort();
   server = await startServer({ port: PORT, token: TOKEN });
   baseUrl = `http://127.0.0.1:${PORT}/mcp`;
@@ -85,13 +85,13 @@ beforeAll(async () => {
 afterAll(() => {
   server.close();
   delete process.env.PCB_MCP_PREVIEW_DIR;
-  const savedLock = (globalThis as Record<string, string | undefined>).__niaSavedLock;
-  const savedProjectsFile = (globalThis as Record<string, string | undefined>).__niaSavedProjectsFile;
+  const savedLock = (globalThis as unknown as Record<string, string | undefined>).__niaSavedLock;
+  const savedProjectsFile = (globalThis as unknown as Record<string, string | undefined>).__niaSavedProjectsFile;
   if (savedLock === undefined) delete process.env.NIATSCIRCUIT_MCP_LOCK;
   else process.env.NIATSCIRCUIT_MCP_LOCK = savedLock;
   if (savedProjectsFile === undefined) delete process.env.NIATSCIRCUIT_PROJECTS_FILE;
   else process.env.NIATSCIRCUIT_PROJECTS_FILE = savedProjectsFile;
-  const tmpRoot = (globalThis as Record<string, string>).__niaPreviewTmpRoot;
+  const tmpRoot = (globalThis as unknown as Record<string, string>).__niaPreviewTmpRoot;
   if (tmpRoot) fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
