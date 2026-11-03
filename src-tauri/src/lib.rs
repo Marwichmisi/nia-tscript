@@ -165,6 +165,8 @@ fn set_current(state: &tauri::State<'_, Arc<Mutex<BootState>>>, project: Option<
 struct ProjectItem {
     path: String,
     name: String,
+    /// Dossier parent complet (homonymes distingués dans l'Accueil).
+    parent: String,
     exists: bool,
     #[serde(rename = "lastOpened")]
     last_opened: String,
@@ -179,7 +181,13 @@ struct ProjectList {
 
 #[tauri::command]
 fn list_projects() -> Result<ProjectList, String> {
-    let reg = load_registry();
+    let mut reg = load_registry();
+    // Réconciliation boot (ticket #38) : existence vérifiée, orphelin
+    // explicite (`exists: false`), `lastOpened` réparé et persisté.
+    let reconciled = project::reconcile_registry(&mut reg);
+    if reconciled.current_reset {
+        save_registry(&reg)?;
+    }
     let mut items: Vec<ProjectItem> = reg
         .projects
         .iter()
@@ -192,6 +200,7 @@ fn list_projects() -> Result<ProjectList, String> {
                     .and_then(|n| n.to_str())
                     .unwrap_or(&e.path)
                     .to_string(),
+                parent: project::parent_of_project_path(&e.path),
                 exists: p.exists(),
                 last_opened: e.last_opened.clone(),
             }
@@ -209,7 +218,15 @@ fn list_projects() -> Result<ProjectList, String> {
 fn current_project(
     state: tauri::State<'_, Arc<Mutex<BootState>>>,
 ) -> Result<Option<String>, String> {
-    Ok(state.lock().expect("boot state").project_path.clone())
+    let cur = state.lock().expect("boot state").project_path.clone();
+    match cur {
+        // Dossier supprimé (orphelin) → Accueil : réinitialisé, pas fantôme.
+        Some(p) if !std::path::Path::new(&p).exists() => {
+            set_current(&state, None);
+            Ok(None)
+        }
+        other => Ok(other),
+    }
 }
 
 #[tauri::command]
@@ -218,7 +235,7 @@ fn create_project(
     path: String,
     template: Option<String>,
 ) -> Result<String, String> {
-    let dir = project::validate_project_path(&path)?;
+    let dir = project::canonical_project_path(&path)?;
     let tpl = template.as_deref().unwrap_or("vide");
     project::ensure_project_layout(&dir, tpl)?;
     let mut reg = load_registry();
@@ -234,7 +251,7 @@ fn open_project(
     state: tauri::State<'_, Arc<Mutex<BootState>>>,
     path: String,
 ) -> Result<String, String> {
-    let dir = project::validate_project_path(&path)?;
+    let dir = project::canonical_project_path(&path)?;
     if !dir.exists() {
         return Err("dossier introuvable".into());
     }
@@ -242,6 +259,9 @@ fn open_project(
     if !main.exists() {
         return Err("dossier sans main.tsx : refuse d'ouvrir".into());
     }
+    // Disque source de vérité : circuit.json recréé si absent, migré si
+    // legacy, erreur visible si corrompu (ticket #38).
+    project::ensure_circuit_file(&dir)?;
     let mut reg = load_registry();
     project::upsert_registry(&mut reg, &dir.to_string_lossy(), &project::now_rfc3339());
     save_registry(&reg)?;
@@ -258,11 +278,54 @@ fn close_project(state: tauri::State<'_, Arc<Mutex<BootState>>>) -> Result<(), S
 
 #[tauri::command]
 fn forget_project(path: String) -> Result<(), String> {
-    let dir = project::validate_project_path(&path)?;
+    let dir = project::canonical_project_path(&path)?;
     let mut reg = load_registry();
     project::forget_registry(&mut reg, &dir.to_string_lossy());
     save_registry(&reg)?;
     Ok(())
+}
+
+/// Relink un Projet orphelin (ticket #38) : remplace l'ancien chemin par le
+/// nouveau (existant + `main.tsx` requis, circuit garanti) en conservant
+/// l'ordre et `lastOpened`. Le Projet courant suit s'il était l'orphelin.
+#[tauri::command]
+fn relink_project(
+    state: tauri::State<'_, Arc<Mutex<BootState>>>,
+    old_path: String,
+    new_path: String,
+) -> Result<String, String> {
+    let old = project::canonical_project_path(&old_path)?;
+    let new = project::canonical_project_path(&new_path)?;
+    if !new.exists() {
+        return Err("nouveau dossier introuvable".into());
+    }
+    if !project::project_paths(&new).main.exists() {
+        return Err("nouveau dossier sans main.tsx : refuse de relier".into());
+    }
+    project::ensure_circuit_file(&new)?;
+    let old_s = old.to_string_lossy().to_string();
+    let new_s = new.to_string_lossy().to_string();
+    let mut reg = load_registry();
+    if !reg.projects.iter().any(|e| e.path == old_s) {
+        return Err("ancien chemin inconnu du Registre".into());
+    }
+    for e in reg.projects.iter_mut() {
+        if e.path == old_s {
+            e.path = new_s.clone();
+            e.last_opened = project::now_rfc3339();
+        }
+    }
+    reg.projects
+        .sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
+    if reg.last_opened.as_deref() == Some(old_s.as_str()) {
+        reg.last_opened = Some(new_s.clone());
+    }
+    save_registry(&reg)?;
+    let cur = state.lock().expect("boot state").project_path.clone();
+    if cur.as_deref() == Some(old_s.as_str()) {
+        set_current(&state, Some(new_s.clone()));
+    }
+    Ok(new_s)
 }
 
 #[tauri::command]
@@ -270,7 +333,7 @@ fn delete_project(
     state: tauri::State<'_, Arc<Mutex<BootState>>>,
     path: String,
 ) -> Result<(), String> {
-    let dir = project::validate_project_path(&path)?;
+    let dir = project::canonical_project_path(&path)?;
     if dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(|e| format!("suppression dossier : {e}"))?;
     }
@@ -296,7 +359,7 @@ fn read_project_main(
     path: Option<String>,
 ) -> Result<ProjectMain, String> {
     let target = match path {
-        Some(p) => project::validate_project_path(&p)?.to_string_lossy().to_string(),
+        Some(p) => project::canonical_project_path(&p)?.to_string_lossy().to_string(),
         None => state
             .lock()
             .expect("boot state")
@@ -304,7 +367,7 @@ fn read_project_main(
             .clone()
             .ok_or("aucun projet ouvert")?,
     };
-    let dir = project::validate_project_path(&target)?;
+    let dir = project::canonical_project_path(&target)?;
     let main = project::project_paths(&dir).main;
     let code = std::fs::read_to_string(&main).map_err(|e| format!("lecture main.tsx : {e}"))?;
     Ok(ProjectMain {
@@ -380,6 +443,7 @@ pub fn run() {
             open_project,
             close_project,
             forget_project,
+            relink_project,
             delete_project,
             read_project_main
         ])

@@ -3,7 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { Check, CircuitBoard, Copy, FolderOpen, Plus, Trash2, X } from "lucide-react";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
-import { projectName, type ProjectItem } from "../lib/projects";
+import { projectName, projectParentName, type ProjectItem } from "../lib/projects";
 
 interface HomeProps {
   projects: ProjectItem[];
@@ -13,6 +13,7 @@ interface HomeProps {
   onOpen: (path: string) => void;
   onCreate: (path: string, template: "vide" | "demo") => void;
   onForget: (path: string) => void;
+  onRelink: (oldPath: string, newPath: string) => void;
   onDelete: (path: string) => void;
   bridge: string;
   boot: string;
@@ -20,7 +21,7 @@ interface HomeProps {
   onCopyBridge: () => void;
 }
 
-export function Home({ projects, lastOpened, busy, error, onOpen, onCreate, onForget, onDelete, bridge, boot, bridgeCopied, onCopyBridge }: HomeProps) {
+export function Home({ projects, lastOpened, busy, error, onOpen, onCreate, onForget, onRelink, onDelete, bridge, boot, bridgeCopied, onCopyBridge }: HomeProps) {
   const [template, setTemplate] = useState<"vide" | "demo">("vide");
   const empty = projects.length === 0;
 
@@ -37,6 +38,15 @@ export function Home({ projects, lastOpened, busy, error, onOpen, onCreate, onFo
     try {
       const sel = await open({ directory: true, multiple: false, title: "Ouvrir un dossier projet" });
       if (typeof sel === "string" && sel) onOpen(sel);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function pickAndRelink(oldPath: string) {
+    try {
+      const sel = await open({ directory: true, multiple: false, title: `Relier « ${oldPath} » vers…` });
+      if (typeof sel === "string" && sel) onRelink(oldPath, sel);
     } catch (e) {
       console.error(e);
     }
@@ -114,11 +124,21 @@ export function Home({ projects, lastOpened, busy, error, onOpen, onCreate, onFo
               <li key={p.path} className={p.path === lastOpened ? "home-item home-current" : "home-item"}>
                 <button className="home-open" onClick={() => onOpen(p.path)} disabled={busy || !p.exists} title={p.path}>
                   <span className="home-name">{p.name || projectName(p.path)}</span>
+                  {p.parent ? (
+                    <span className="home-parent" title={p.parent}>
+                      dans {projectParentName(p.parent) || p.parent}
+                    </span>
+                  ) : null}
                   <span className="home-path">{p.path}</span>
                 </button>
                 <span className="home-meta">
                   {p.path === lastOpened && <Badge variant="default">dernier</Badge>}
                   {!p.exists && <Badge variant="destructive">introuvable</Badge>}
+                  {!p.exists && (
+                    <Button variant="outline" size="sm" onClick={() => void pickAndRelink(p.path)} disabled={busy} aria-label={`Relier ${p.path} vers un nouveau dossier`}>
+                      Relier…
+                    </Button>
+                  )}
                   <Button variant="ghost" size="sm" onClick={() => onForget(p.path)} disabled={busy} aria-label={`Oublier ${p.path}`}>
                     <X size={14} aria-hidden="true" />
                     Oublier

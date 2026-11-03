@@ -22,6 +22,7 @@ import {
   currentProject,
   deleteProject as deleteProj,
   forgetProject as forgetProj,
+  relinkProject as relinkProj,
   listProjects,
   openProject as openProj,
   projectName,
@@ -192,8 +193,10 @@ export default function App() {
         try {
           const main = await readProjectMain(cur);
           setProjectCode(main.code);
-        } catch {
-          setProjectCode(BOARD_CODE);
+        } catch (e) {
+          // Jamais de Gabarit démo masquant (ticket #38, US5) : erreur visible.
+          setProjectCode("");
+          setProjError(`lecture Projet impossible : ${e instanceof Error ? e.message : String(e)}`);
         }
       }
     } catch (e) {
@@ -256,8 +259,14 @@ export default function App() {
     await withProjBusy(async () => {
       const opened = await openProj(p);
       setProjectPath(opened);
-      const main = await readProjectMain(opened);
-      setProjectCode(main.code);
+      try {
+        const main = await readProjectMain(opened);
+        setProjectCode(main.code);
+      } catch (e) {
+        // Jamais de Gabarit démo masquant : erreur visible, éditeur vide.
+        setProjectCode("");
+        throw new Error(`Projet ouvert mais illisible : ${e instanceof Error ? e.message : String(e)}`);
+      }
       await refreshProjects();
     });
   }
@@ -266,8 +275,13 @@ export default function App() {
     await withProjBusy(async () => {
       const created = await createProj(p, template);
       setProjectPath(created);
-      const main = await readProjectMain(created);
-      setProjectCode(main.code);
+      try {
+        const main = await readProjectMain(created);
+        setProjectCode(main.code);
+      } catch (e) {
+        setProjectCode("");
+        throw new Error(`Projet créé mais illisible : ${e instanceof Error ? e.message : String(e)}`);
+      }
       await refreshProjects();
     });
   }
@@ -283,6 +297,21 @@ export default function App() {
   async function handleForget(p: string) {
     await withProjBusy(async () => {
       await forgetProj(p);
+      await refreshProjects();
+    });
+  }
+
+  async function handleRelink(oldPath: string, newPath: string) {
+    await withProjBusy(async () => {
+      const relinked = await relinkProj(oldPath, newPath);
+      setProjectPath(relinked);
+      try {
+        const main = await readProjectMain(relinked);
+        setProjectCode(main.code);
+      } catch (e) {
+        setProjectCode("");
+        throw new Error(`Projet relié mais illisible : ${e instanceof Error ? e.message : String(e)}`);
+      }
       await refreshProjects();
     });
   }
@@ -416,6 +445,7 @@ export default function App() {
           onOpen={handleOpen}
           onCreate={handleCreate}
           onForget={handleForget}
+          onRelink={handleRelink}
           onDelete={handleDelete}
           bridge={bridge}
           boot={boot}

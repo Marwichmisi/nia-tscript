@@ -10,11 +10,13 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { startServer } from "../src/http";
 import { resetStoreForTests, getCode } from "../src/state";
 import { resetQueueForTests } from "../src/queue";
+import { ensureTestProject, setupIsolatedRegistry, type IsolatedEnv } from "./helpers";
 
 const TOKEN = "test-live-" + Math.random().toString(36).slice(2);
 let PORT = 0;
 let server: Server;
 let baseUrl = "";
+let env: IsolatedEnv;
 
 function freePort(): Promise<number> {
   return new Promise((resolve) => {
@@ -67,6 +69,7 @@ async function callLive(args: Record<string, unknown>): Promise<LiveOutput> {
 }
 
 beforeAll(async () => {
+  env = setupIsolatedRegistry("nia-live-");
   PORT = await freePort();
   server = await startServer({ port: PORT, token: TOKEN });
   baseUrl = `http://127.0.0.1:${PORT}/mcp`;
@@ -74,11 +77,13 @@ beforeAll(async () => {
 
 afterAll(() => {
   server.close();
+  env.restore();
 });
 
 beforeEach(() => {
   resetStoreForTests();
   resetQueueForTests();
+  ensureTestProject();
 });
 
 describe("S8-B — live_manage write-through", () => {

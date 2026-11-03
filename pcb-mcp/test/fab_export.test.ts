@@ -12,12 +12,14 @@ import { Client } from "@modelcontextprotocol/client";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { startServer } from "../src/http";
 import { resetStoreForTests } from "../src/state";
+import { ensureTestProject, setupIsolatedRegistry, type IsolatedEnv } from "./helpers";
 
 const TOKEN = "test-fab-" + Math.random().toString(36).slice(2);
 let PORT = 0;
 let server: Server;
 let baseUrl = "";
 let exportDir = "";
+let env: IsolatedEnv;
 
 function freePort(): Promise<number> {
   return new Promise((resolve) => {
@@ -71,6 +73,7 @@ async function callFab(args: Record<string, unknown>): Promise<FabOutput> {
 }
 
 beforeAll(async () => {
+  env = setupIsolatedRegistry("nia-fab-reg-");
   PORT = await freePort();
   server = await startServer({ port: PORT, token: TOKEN });
   baseUrl = `http://127.0.0.1:${PORT}/mcp`;
@@ -80,12 +83,14 @@ beforeAll(async () => {
 
 afterAll(() => {
   server.close();
+  env.restore();
   delete process.env.PCB_MCP_EXPORT_DIR;
   fs.rmSync(exportDir, { recursive: true, force: true });
 });
 
 beforeEach(() => {
   resetStoreForTests();
+  ensureTestProject();
 });
 
 describe("S9-B MCP — fab_export V1", () => {

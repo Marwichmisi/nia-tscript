@@ -9,6 +9,7 @@ import { Client } from "@modelcontextprotocol/client";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { startServer } from "../src/http";
 import { resetStoreForTests } from "../src/state";
+import { ensureTestProject } from "./helpers";
 import { savePreview } from "../src/preview";
 import { currentProjectPath, projectPreviewsDir } from "../src/project";
 
@@ -97,6 +98,9 @@ afterAll(() => {
 
 beforeEach(() => {
   resetStoreForTests();
+  // Projet explicite (ticket #38) : le chemin "sans screenshot" testé est le
+  // vrai fallback, pas le gating NO_PROJECT_OPEN.
+  ensureTestProject();
   for (const f of fs.readdirSync(previewDir)) fs.rmSync(path.join(previewDir, f), { force: true });
   // Vide aussi <Projet test>/previews/ pour que le fallback override soit déterministe.
   try {

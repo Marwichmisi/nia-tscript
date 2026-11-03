@@ -9,11 +9,13 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { startServer } from "../src/http";
 import { resetStoreForTests, getCode } from "../src/state";
 import { resetQueueForTests } from "../src/queue";
+import { ensureTestProject, setupIsolatedRegistry, type IsolatedEnv } from "./helpers";
 
 const TOKEN = "test-batch-" + Math.random().toString(36).slice(2);
 let PORT = 0;
 let server: Server;
 let baseUrl = "";
+let env: IsolatedEnv;
 
 function freePort(): Promise<number> {
   return new Promise((resolve) => {
@@ -64,6 +66,7 @@ async function callBatch(args: Record<string, unknown>): Promise<BatchOutput> {
 }
 
 beforeAll(async () => {
+  env = setupIsolatedRegistry("nia-batch-");
   PORT = await freePort();
   server = await startServer({ port: PORT, token: TOKEN });
   baseUrl = `http://127.0.0.1:${PORT}/mcp`;
@@ -71,11 +74,13 @@ beforeAll(async () => {
 
 afterAll(() => {
   server.close();
+  env.restore();
 });
 
 beforeEach(() => {
   resetStoreForTests();
   resetQueueForTests();
+  ensureTestProject();
 });
 
 describe("S10-B — batch_execute atomique", () => {

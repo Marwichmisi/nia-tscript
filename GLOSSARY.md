@@ -51,3 +51,7 @@ _Avoid_: manifold-3d, moteur 3D, WASM 3D
 **Capture nommée**:
 Un screenshot agent stocké sous `<source>__<slug>.png` dans `<Projet ouvert>/previews/`, relu via `source + name?`.
 _Avoid_: screenshot custom, image labellisée, snapshot nommé
+
+**Confinement**:
+La règle backend qui n'autorise les opérations dossier que sur un Projet du Registre, après `canonicalize`.
+_Avoid_: jail, sandbox, bac à sable
