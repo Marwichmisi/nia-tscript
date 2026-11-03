@@ -167,6 +167,9 @@ export default function App() {
   const [shot, setShot] = useState<Shot | null>(null);
   const [shotErr, setShotErr] = useState<string | null>(null);
   const [shotBusy, setShotBusy] = useState(false);
+  const [shotName, setShotName] = useState("");
+  const [manifoldStatus, setManifoldStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [manifoldError, setManifoldError] = useState<string | null>(null);
   const [pcbRenderer, setPcbRenderer] = useState<"webgpu" | "canvas">(() => initialPcbRenderer());
   const tsxCopy = useCopyFeedback();
   const bridgeCopy = useCopyFeedback();
@@ -203,14 +206,26 @@ export default function App() {
   }, [refreshProjects]);
 
   // Manifold local pré-chargé une fois (offline-first, évite l'import jsdelivr).
+  // Gate la Review 3D : CadViewer monté seulement quand window.ManifoldModule prêt,
+  // sinon la Review 3D part sur CDN et affiche le bandeau rouge.
   useEffect(() => {
     let alive = true;
+    setManifoldStatus("loading");
+    setManifoldError(null);
     void preloadManifold()
       .then(() => {
-        if (alive) log("manifold local pré-chargé (offline-first)");
+        if (alive) {
+          setManifoldStatus("ready");
+          log("manifold local pré-chargé (offline-first)");
+        }
       })
       .catch((e: unknown) => {
-        if (alive) log(`manifold local ÉCHEC : ${e instanceof Error ? e.message : String(e)}`);
+        if (alive) {
+          const msg = e instanceof Error ? e.message : String(e);
+          setManifoldStatus("error");
+          setManifoldError(msg);
+          log(`manifold local ÉCHEC : ${msg}`);
+        }
       });
     return () => {
       alive = false;
@@ -365,6 +380,7 @@ export default function App() {
           dataUrl: r.dataUrl,
           width: r.width,
           height: r.height,
+          name: shotName.trim() ? shotName.trim() : null,
         })) as { previewUrl: string };
         previewUrl = saved.previewUrl;
       } catch {
@@ -565,8 +581,39 @@ export default function App() {
                     height={viewerHeight > 0 ? viewerHeight : undefined}
                     renderer={pcbRenderer}
                   />
+                ) : manifoldStatus === "ready" ? (
+                <CadViewer key="manifold-ready" circuitJson={circuitJson as never} />
+                ) : manifoldStatus === "error" ? (
+                  <div className="viewer-fallback" role="alert">
+                    <div className="viewer-fallback-title">Review 3D indisponible (Manifold local)</div>
+                    <p>
+                      Le module géométrie n'a pas chargé en local. Vérifie l'onglet Rendu PCB / Schéma,
+                      puis réessaie — aucun appel réseau CDN n'est tenté.
+                    </p>
+                    <pre className="viewer-fallback-err">{manifoldError}</pre>
+                    <button
+                      type="button"
+                      className="viewer-chip"
+                      onClick={() => {
+                        setManifoldStatus("loading");
+                        setManifoldError(null);
+                        void preloadManifold()
+                          .then(() => {
+                            setManifoldStatus("ready");
+                            log("manifold local pré-chargé (retry)");
+                          })
+                          .catch((e: unknown) => {
+                            const msg = e instanceof Error ? e.message : String(e);
+                            setManifoldStatus("error");
+                            setManifoldError(msg);
+                          });
+                      }}
+                    >
+                      Réessayer Manifold local
+                    </button>
+                  </div>
                 ) : (
-                <CadViewer circuitJson={circuitJson as never} />
+                  <div className="viewer-empty">Chargement géométrie 3D locale…</div>
               )}
             </ViewerErrorBoundary>
           )}
@@ -594,6 +641,8 @@ export default function App() {
         shot={shot}
         shotErr={shotErr}
         shotBusy={shotBusy}
+        shotName={shotName}
+        onShotNameChange={setShotName}
         source={KIND[tab]}
         onShot={onShot}
       />

@@ -75,6 +75,22 @@ describe("S-preview-pur — store screenshot agent", () => {
     expect(fs.existsSync(previewFilePath("pcb_2d", dir))).toBe(false);
   });
 
+  test("capture nommée → fichier __slug + lecture par nom, défaut dernier", () => {
+    const named = savePreview(
+      { source: "pcb_2d", dataUrl: PIXEL_1X1, width: 2, height: 2, name: "verif-xyz" },
+      dir,
+    );
+    expect(named.name).toBe("verif-xyz");
+    expect(named.path).toContain("pcb_2d__verif-xyz.png");
+    const readNamed = readPreview("pcb_2d", { dir, name: "verif-xyz" });
+    expect(readNamed.found).toBe(true);
+    expect(readNamed.name).toBe("verif-xyz");
+    // Nom inconnu → explicite, jamais d'image inventée.
+    const missing = readPreview("pcb_2d", { dir, name: "introuvable" });
+    expect(missing.found).toBe(false);
+    expect(missing.errors).toBe(1);
+  });
+
   test("bandeaux offline + no-GPU documentés", () => {
     expect(OFFLINE_BANNER).toMatch(/RÉSEAU|CDN/);
     expect(NO_GPU_FALLBACK).toMatch(/WebGPU|fallback/);

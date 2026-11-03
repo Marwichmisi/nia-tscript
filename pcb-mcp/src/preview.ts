@@ -52,12 +52,30 @@ export function previewDir(): string {
   return path.join(os.tmpdir(), "niatscircuit-previews");
 }
 
-export function previewFilePath(source: PreviewSource, dir?: string): string {
-  return path.join(dir ?? previewDir(), `${source}.png`);
+export function previewFilePath(source: PreviewSource, dir?: string, name?: string | null): string {
+  const slug = sanitizePreviewName(name);
+  const file = slug ? `${source}__${slug}.png` : `${source}.png`;
+  return path.join(dir ?? previewDir(), file);
 }
 
-export function previewMetaPath(source: PreviewSource, dir?: string): string {
-  return path.join(dir ?? previewDir(), `${source}.json`);
+export function previewMetaPath(source: PreviewSource, dir?: string, name?: string | null): string {
+  const slug = sanitizePreviewName(name);
+  const file = slug ? `${source}__${slug}.json` : `${source}.json`;
+  return path.join(dir ?? previewDir(), file);
+}
+
+/** Nom de capture agent (Q10) : slug `a-z0-9-_`, max 32, vide → null. */
+export function sanitizePreviewName(name?: unknown): string | null {
+  if (name === undefined || name === null) return null;
+  const raw = String(name).trim();
+  if (!raw) return null;
+  let slug = raw
+    .replace(/[^A-Za-z0-9_-]+/g, "-")
+    .replace(/^[-_]+|[-_]+$/g, "")
+    .slice(0, 32)
+    .replace(/^[-_]+|[-_]+$/g, "");
+  while (slug.includes("--")) slug = slug.replace(/--/g, "-");
+  return slug || null;
 }
 
 function ensureDir(dir: string): void {
@@ -87,10 +105,12 @@ export interface SavePreviewInput {
   dataUrl: string;
   width?: number;
   height?: number;
+  name?: string;
 }
 
 export interface SavedPreview {
   source: PreviewSource;
+  name: string | null;
   bytes: number;
   width: number;
   height: number;
@@ -105,6 +125,7 @@ export function savePreview(input: SavePreviewInput, dir?: string): SavedPreview
   const norm = normalizePreviewSource(input.source);
   if (!norm.ok) throw new Error(norm.message);
   const source = norm.source;
+  const name = sanitizePreviewName(input.name);
   const targetDir = dir ?? previewDir();
   ensureDir(targetDir);
   if (typeof input.dataUrl !== "string" || !input.dataUrl.startsWith(PNG_PREFIX)) {
@@ -128,18 +149,19 @@ export function savePreview(input: SavePreviewInput, dir?: string): SavedPreview
     width = dims.width;
     height = dims.height;
   }
-  const filePath = previewFilePath(source, targetDir);
+  const filePath = previewFilePath(source, targetDir, name);
   fs.writeFileSync(filePath, buf);
   const updatedAt = new Date().toISOString();
   const previewUrl = pathToFileURL(filePath).href;
-  const meta = { source, bytes: buf.length, width, height, updatedAt, previewUrl };
-  fs.writeFileSync(previewMetaPath(source, targetDir), JSON.stringify(meta, null, 2));
-  return { source, bytes: buf.length, width, height, path: filePath, previewUrl, updatedAt };
+  const meta = { source, name, bytes: buf.length, width, height, updatedAt, previewUrl };
+  fs.writeFileSync(previewMetaPath(source, targetDir, name), JSON.stringify(meta, null, 2));
+  return { source, name, bytes: buf.length, width, height, path: filePath, previewUrl, updatedAt };
 }
 
 export interface ReadPreviewResult {
   found: boolean;
   source: PreviewSource | string;
+  name: string | null;
   dataUrl: string | null;
   bytes: number;
   width: number | null;
@@ -152,9 +174,36 @@ export interface ReadPreviewResult {
   warnings: number;
 }
 
+function latestPreviewPath(source: PreviewSource, dir: string): { path: string; name: string | null } | null {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return null;
+  }
+  const candidates = entries.filter(
+    (f) => f === `${source}.png` || (f.startsWith(`${source}__`) && f.endsWith(".png")),
+  );
+  if (candidates.length === 0) return null;
+  let best: { path: string; mtime: number; name: string | null } | null = null;
+  for (const f of candidates) {
+    const full = path.join(dir, f);
+    let mtime = 0;
+    try {
+      mtime = fs.statSync(full).mtimeMs;
+    } catch {
+      continue;
+    }
+    const m = f.match(new RegExp(`^${source}__([A-Za-z0-9_-]+)\\.png$`));
+    const n = m ? m[1]! : null;
+    if (!best || mtime > best.mtime) best = { path: full, mtime, name: n };
+  }
+  return best ? { path: best.path, name: best.name } : null;
+}
+
 export function readPreview(
   sourceInput: unknown,
-  opts?: { dir?: string; disableCdnLoading?: boolean },
+  opts?: { dir?: string; disableCdnLoading?: boolean; name?: string },
 ): ReadPreviewResult {
   const banner = opts?.disableCdnLoading ? OFFLINE_BANNER : null;
   const norm = normalizePreviewSource(sourceInput);
@@ -162,6 +211,7 @@ export function readPreview(
     return {
       found: false,
       source: typeof sourceInput === "string" ? sourceInput : "",
+      name: null,
       dataUrl: null,
       bytes: 0,
       width: null,
@@ -176,11 +226,42 @@ export function readPreview(
   }
   const source = norm.source;
   const targetDir = opts?.dir ?? previewDir();
-  const filePath = previewFilePath(source, targetDir);
+  const wanted = sanitizePreviewName(opts?.name);
+  let filePath: string;
+  let resolvedName: string | null;
+  if (wanted) {
+    resolvedName = wanted;
+    filePath = previewFilePath(source, targetDir, wanted);
+  } else {
+    const latest = latestPreviewPath(source, targetDir);
+    if (!latest) {
+      return {
+        found: false,
+        source,
+        name: null,
+        dataUrl: null,
+        bytes: 0,
+        width: null,
+        height: null,
+        previewUrl: null,
+        updatedAt: null,
+        banner,
+        message:
+          `aucun screenshot pour ${source} — ouvre l'app, affiche l'onglet ` +
+          `${source === "schematic_2d" ? "Schéma" : source === "pcb_2d" ? "PCB" : "3D"} ` +
+          `puis clique « Screenshot agent ». ${NO_GPU_FALLBACK}`,
+        errors: 1,
+        warnings: 0,
+      };
+    }
+    filePath = latest.path;
+    resolvedName = latest.name;
+  }
   if (!fs.existsSync(filePath)) {
     return {
       found: false,
       source,
+      name: resolvedName,
       dataUrl: null,
       bytes: 0,
       width: null,
@@ -189,7 +270,7 @@ export function readPreview(
       updatedAt: null,
       banner,
       message:
-        `aucun screenshot pour ${source} — ouvre l'app, affiche l'onglet ` +
+        `aucun screenshot pour ${source}${resolvedName ? ` (${resolvedName})` : ""} — ouvre l'app, affiche l'onglet ` +
         `${source === "schematic_2d" ? "Schéma" : source === "pcb_2d" ? "PCB" : "3D"} ` +
         `puis clique « Screenshot agent ». ${NO_GPU_FALLBACK}`,
       errors: 1,
@@ -203,6 +284,7 @@ export function readPreview(
     return {
       found: false,
       source,
+      name: resolvedName,
       dataUrl: null,
       bytes: 0,
       width: null,
@@ -219,7 +301,7 @@ export function readPreview(
   let height: number | null = null;
   let updatedAt: string | null = null;
   try {
-    const metaRaw = fs.readFileSync(previewMetaPath(source, targetDir), "utf8");
+    const metaRaw = fs.readFileSync(previewMetaPath(source, targetDir, resolvedName), "utf8");
     const meta = JSON.parse(metaRaw) as { width?: unknown; height?: unknown; updatedAt?: unknown };
     if (typeof meta.width === "number" && meta.width > 0) width = Math.trunc(meta.width);
     if (typeof meta.height === "number" && meta.height > 0) height = Math.trunc(meta.height);
@@ -237,6 +319,7 @@ export function readPreview(
   return {
     found: true,
     source,
+    name: resolvedName,
     dataUrl: `${PNG_PREFIX}${buf.toString("base64")}`,
     bytes: buf.length,
     width,

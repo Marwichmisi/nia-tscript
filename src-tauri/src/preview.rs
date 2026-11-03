@@ -1,10 +1,9 @@
-//! Screenshots preview partagés WebView ↔ MCP (#15).
+//! Screenshots preview partagés WebView ↔ MCP (#15 + capture nommée Q10).
 //!
-//! La WebView dépose les PNG via la commande `save_screenshot` dans
-//! `cache_dir/niatscircuit/previews/<source>.png` (+ `.json` métadonnées) ;
-//! le sidecar `pcb-mcp` lit le même dossier (env `PCB_MCP_PREVIEW_DIR`
-//! positionné au spawn, voir `lib.rs`). Jamais d'image inventée :
-//! lecture absente → erreur explicite « ouvre l'app » côté MCP.
+//! La WebView dépose les PNG via `save_screenshot` dans
+//! `<projet>/previews/<source>[__<nom>].png` (+ `.json`) si Projet ouvert,
+//! sinon `cache_dir/niatscircuit/previews/` ; le sidecar lit en priorité
+//! le dossier projet. Jamais d'image inventée.
 
 use std::path::{Path, PathBuf};
 
@@ -31,12 +30,55 @@ pub fn preview_dir(cache_dir: &Path) -> PathBuf {
     cache_dir.join("niatscircuit").join("previews")
 }
 
-pub fn preview_png_path(dir: &Path, source: &str) -> PathBuf {
-    dir.join(format!("{source}.png"))
+pub fn preview_png_path(dir: &Path, source: &str, name: Option<&str>) -> PathBuf {
+    match sanitize_preview_name(name) {
+        Some(slug) => dir.join(format!("{source}__{slug}.png")),
+        None => dir.join(format!("{source}.png")),
+    }
 }
 
-pub fn preview_meta_path(dir: &Path, source: &str) -> PathBuf {
-    dir.join(format!("{source}.json"))
+pub fn preview_meta_path(dir: &Path, source: &str, name: Option<&str>) -> PathBuf {
+    match sanitize_preview_name(name) {
+        Some(slug) => dir.join(format!("{source}__{slug}.json")),
+        None => dir.join(format!("{source}.json")),
+    }
+}
+
+/// Nom de capture agent (Q10) : slug `a-z0-9-_`, max 32, vide → None.
+pub fn sanitize_preview_name(name: Option<&str>) -> Option<String> {
+    let raw = name.unwrap_or("").trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let mut slug: String = raw
+        .chars()
+        .map(|c| {
+            if (c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    while (slug.starts_with('-') || slug.starts_with('_')) {
+        slug.remove(0);
+    }
+    while (slug.ends_with('-') || slug.ends_with('_')) {
+        slug.pop();
+    }
+    // Collapse `--` → `-` (lisibilité, un seul passage suffit au MVP).
+    while (slug.contains("--")) {
+        slug = slug.replace("--", "-");
+    }
+    slug.truncate(32);
+    while (slug.ends_with('-') || slug.ends_with('_')) {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        None
+    } else {
+        Some(slug)
+    }
 }
 
 /// Valide une dataURL PNG et retourne (octets, largeur, hauteur).
@@ -85,6 +127,8 @@ pub fn png_dimensions(buf: &[u8]) -> Option<(u32, u32)> {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct SavedPreview {
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub bytes: usize,
     pub width: u32,
     pub height: u32,
@@ -102,17 +146,20 @@ pub fn write_preview(
     data_url: &str,
     width: u32,
     height: u32,
+    name: Option<&str>,
 ) -> Result<SavedPreview, String> {
     let canonical = normalize_source(source)
         .ok_or_else(|| format!("source screenshot inconnue \"{source}\" (attendues : schematic_2d, pcb_2d, pcb_3d)"))?;
     let (buf, w, h) = validate_png_data_url(data_url, width, height)?;
     std::fs::create_dir_all(dir).map_err(|e| format!("création dossier previews : {e}"))?;
-    let png_path = preview_png_path(dir, canonical);
+    let slug = sanitize_preview_name(name);
+    let png_path = preview_png_path(dir, canonical, slug.as_deref());
     std::fs::write(&png_path, &buf).map_err(|e| format!("écriture PNG : {e}"))?;
     let updated_at = chrono::Utc::now().to_rfc3339();
     let preview_url = format!("file://{}", png_path.to_string_lossy());
     let saved = SavedPreview {
         source: canonical.to_string(),
+        name: slug.clone(),
         bytes: buf.len(),
         width: w,
         height: h,
@@ -122,6 +169,7 @@ pub fn write_preview(
     };
     let meta = serde_json::json!({
         "source": saved.source,
+        "name": saved.name,
         "bytes": saved.bytes,
         "width": saved.width,
         "height": saved.height,
@@ -130,7 +178,7 @@ pub fn write_preview(
     });
     let meta_text =
         serde_json::to_string_pretty(&meta).map_err(|e| format!("sérialisation meta : {e}"))?;
-    std::fs::write(preview_meta_path(dir, canonical), meta_text)
+    std::fs::write(preview_meta_path(dir, canonical, slug.as_deref()), meta_text)
         .map_err(|e| format!("écriture meta : {e}"))?;
     Ok(saved)
 }
@@ -170,18 +218,29 @@ mod tests {
     fn write_puis_meta() {
         let dir = std::env::temp_dir().join(format!("nia-preview-rs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let saved = write_preview(&dir, "pcb_2d", PIXEL_1X1, 10, 20).expect("write");
+        let saved = write_preview(&dir, "pcb_2d", PIXEL_1X1, 10, 20, None).expect("write");
         assert_eq!(saved.width, 10);
         assert_eq!(saved.height, 20);
         assert!(saved.preview_url.starts_with("file://"));
-        assert!(preview_png_path(&dir, "pcb_2d").exists());
-        assert!(preview_meta_path(&dir, "pcb_2d").exists());
+        assert!(preview_png_path(&dir, "pcb_2d", None).exists());
+        assert!(preview_meta_path(&dir, "pcb_2d", None).exists());
+        let named = write_preview(&dir, "pcb_2d", PIXEL_1X1, 10, 20, Some("verif-xyz")).expect("write nommé");
+        assert_eq!(named.name.as_deref(), Some("verif-xyz"));
+        assert!(preview_png_path(&dir, "pcb_2d", Some("verif-xyz")).exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sanitize_nom_capture() {
+        assert_eq!(sanitize_preview_name(None), None);
+        assert_eq!(sanitize_preview_name(Some("")), None);
+        assert_eq!(sanitize_preview_name(Some("verif-xyz")), Some("verif-xyz".to_string()));
+        assert_eq!(sanitize_preview_name(Some("  A B/C ")), Some("A-B-C".to_string()));
     }
 
     #[test]
     fn write_rejette_source_inconnue() {
         let dir = std::env::temp_dir().join(format!("nia-preview-rs-bad-{}", std::process::id()));
-        assert!(write_preview(&dir, "gerber_layer", PIXEL_1X1, 1, 1).is_err());
+        assert!(write_preview(&dir, "gerber_layer", PIXEL_1X1, 1, 1, None).is_err());
     }
 }

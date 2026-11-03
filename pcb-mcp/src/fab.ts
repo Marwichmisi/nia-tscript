@@ -76,7 +76,7 @@ export interface ExportFabOptions {
 
 function sanitizeProjectName(name: string): string {
   const t = sanitizeSegment(name);
-  return t === "default" ? "nia-demo" : t;
+  return t === "default" ? "board" : t;
 }
 
 /** Exports fab V1 depuis un circuit-json déjà compilé. Rien d'inventé. */
@@ -84,7 +84,7 @@ export async function exportFab(
   circuitJson: unknown[],
   opts?: ExportFabOptions,
 ): Promise<FabOk | FabErr> {
-  const projectName = sanitizeProjectName(opts?.projectName ?? "nia-demo");
+  const projectName = sanitizeProjectName(opts?.projectName ?? "board");
   if (!Array.isArray(circuitJson) || circuitJson.length === 0) {
     return { ok: false, message: "circuit-json vide : compilez d'abord via code_patch (aucun fichier fab inventé)" };
   }

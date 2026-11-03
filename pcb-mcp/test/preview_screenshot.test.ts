@@ -10,6 +10,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { startServer } from "../src/http";
 import { resetStoreForTests } from "../src/state";
 import { savePreview } from "../src/preview";
+import { currentProjectPath, projectPreviewsDir } from "../src/project";
 
 const TOKEN = "test-preview-" + Math.random().toString(36).slice(2);
 let PORT = 0;
@@ -69,6 +70,10 @@ async function callPreview(args: Record<string, unknown>): Promise<PreviewOutput
 beforeAll(async () => {
   previewDir = fs.mkdtempSync(path.join(os.tmpdir(), "nia-preview-mcp-"));
   process.env.PCB_MCP_PREVIEW_DIR = previewDir;
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "nia-preview-lock-"));
+  process.env.NIATSCIRCUIT_MCP_LOCK = path.join(tmpRoot, "mcp.json");
+  process.env.NIATSCIRCUIT_PROJECTS_FILE = path.join(tmpRoot, "projects.json");
+  (globalThis as Record<string, string>).__niaPreviewTmpRoot = tmpRoot;
   PORT = await freePort();
   server = await startServer({ port: PORT, token: TOKEN });
   baseUrl = `http://127.0.0.1:${PORT}/mcp`;
@@ -77,11 +82,23 @@ beforeAll(async () => {
 afterAll(() => {
   server.close();
   delete process.env.PCB_MCP_PREVIEW_DIR;
+  delete process.env.NIATSCIRCUIT_MCP_LOCK;
+  delete process.env.NIATSCIRCUIT_PROJECTS_FILE;
+  const tmpRoot = (globalThis as Record<string, string>).__niaPreviewTmpRoot;
+  if (tmpRoot) fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
 beforeEach(() => {
   resetStoreForTests();
   for (const f of fs.readdirSync(previewDir)) fs.rmSync(path.join(previewDir, f), { force: true });
+  // Vide aussi <Projet test>/previews/ pour que le fallback override soit déterministe.
+  try {
+    const proj = currentProjectPath();
+    if (proj) {
+      const d = projectPreviewsDir(proj);
+      if (fs.existsSync(d)) for (const f of fs.readdirSync(d)) fs.rmSync(path.join(d, f), { force: true });
+    }
+  } catch { /* best-effort */ }
 });
 
 describe("S-preview-MCP — preview_screenshot agent", () => {

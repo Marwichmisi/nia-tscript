@@ -52,6 +52,8 @@ interface TerminalProps {
   shot: Shot | null;
   shotErr: string | null;
   shotBusy: boolean;
+  shotName: string;
+  onShotNameChange: (n: string) => void;
   source: PreviewSource;
   onShot: () => void;
 }
@@ -278,6 +280,19 @@ export function Terminal(props: TerminalProps) {
             </TabsContent>
 
             <TabsContent value="shot">
+              <div className="term-shot-name">
+                <label htmlFor="shot-name">Capture nommée (optionnel)</label>
+                <input
+                  id="shot-name"
+                  type="text"
+                  value={props.shotName}
+                  onChange={(e) => props.onShotNameChange(e.target.value)}
+                  placeholder="verif-xyz"
+                  maxLength={32}
+                  className="term-shot-input"
+                  translate="no"
+                />
+              </div>
               {props.shotErr && (
                 <p className="term-error" role="alert">
                   Échec : {props.shotErr} — affiche un onglet avec du contenu puis réessaie.

@@ -100,6 +100,7 @@ fn save_screenshot(
     data_url: String,
     width: u32,
     height: u32,
+    name: Option<String>,
 ) -> Result<preview::SavedPreview, String> {
     let project = state.lock().expect("boot state").project_path.clone();
     let dir = match project {
@@ -109,7 +110,7 @@ fn save_screenshot(
             preview::preview_dir(&cache)
         }
     };
-    preview::write_preview(&dir, &source, &data_url, width, height)
+    preview::write_preview(&dir, &source, &data_url, width, height, name.as_deref())
 }
 
 /// Dossier previews partagé (debug UI) : projet ouvert ou cache global.

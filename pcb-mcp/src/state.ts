@@ -26,11 +26,18 @@ export interface BoardState {
 
 export const PROTOCOL_VERSION = "2026-07-28";
 
+export function projectBoardName(): string {
+  const proj = currentProjectPath();
+  if (!proj) return "board";
+  const base = path.basename(proj);
+  return base || "board";
+}
+
 export function getBoardState(sessionId = "default"): BoardState {
   const compile = lastCompile ?? { status: "ok" as const, errors: 0, warnings: 0 };
   return {
     sessionId,
-    board: "nia-demo",
+    board: projectBoardName(),
     ready: compile.status === "ok",
     compile,
     drc: { violations: lastDrcViolations },
@@ -54,7 +61,7 @@ export interface HierarchyComponent {
 
 export function getHierarchy() {
   return {
-    board: "nia-demo",
+    board: projectBoardName(),
     sessionId: "default",
     modules: [
       {

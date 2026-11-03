@@ -47,3 +47,7 @@ _Avoid_: vue 3D, 3D viewer, preview 3D
 **Manifold**:
 Le module WASM de géométrie booléenne chargé par la Review 3D pour construire le board.
 _Avoid_: manifold-3d, moteur 3D, WASM 3D
+
+**Capture nommée**:
+Un screenshot agent stocké sous `<source>__<slug>.png` dans `<Projet ouvert>/previews/`, relu via `source + name?`.
+_Avoid_: screenshot custom, image labellisée, snapshot nommé

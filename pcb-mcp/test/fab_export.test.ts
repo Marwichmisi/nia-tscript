@@ -117,9 +117,13 @@ describe("S9-B MCP — fab_export V1", () => {
     expect(bom).toMatch(/U1/);
     const pnp = fs.readFileSync(path.join(out.exportDir, "pick-and-place.csv"), "utf8");
     expect(pnp).toMatch(/R1/);
-    const pcb = fs.readFileSync(path.join(out.exportDir, "nia-demo.kicad_pcb"), "utf8");
+    const pcbFiles = fs.readdirSync(out.exportDir).filter((f) => f.endsWith(".kicad_pcb"));
+    expect(pcbFiles.length).toBe(1);
+    const pcb = fs.readFileSync(path.join(out.exportDir, pcbFiles[0]!), "utf8");
     expect(pcb).toMatch(/\(kicad_pcb/);
-    const sch = fs.readFileSync(path.join(out.exportDir, "nia-demo.kicad_sch"), "utf8");
+    const schFiles = fs.readdirSync(out.exportDir).filter((f) => f.endsWith(".kicad_sch"));
+    expect(schFiles.length).toBe(1);
+    const sch = fs.readFileSync(path.join(out.exportDir, schFiles[0]!), "utf8");
     expect(sch).toMatch(/\(kicad_sch/);
     // Zips ouvrables.
     const JSZip = (await import("jszip")).default;

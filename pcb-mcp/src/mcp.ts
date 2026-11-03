@@ -265,6 +265,10 @@ const PreviewScreenshotInput = z.object({
   source: z
     .string()
     .describe("schematic_2d | pcb_2d | pcb_3d (alias prototype schematique_2d accepté)"),
+  name: z
+    .string()
+    .optional()
+    .describe("Capture nommée (slug a-z0-9-_, max 32, défaut: dernier de la source)"),
   disableCdnLoading: z
     .boolean()
     .optional()
@@ -274,6 +278,7 @@ const PreviewScreenshotInput = z.object({
 const PreviewScreenshotOutput = z.object({
   sessionId: z.string(),
   source: z.string(),
+  name: z.string().nullable(),
   found: z.boolean(),
   dataUrl: z.string().nullable(),
   bytes: z.number(),
@@ -405,7 +410,7 @@ const FabExportInput = z.object({
   project_name: z
     .string()
     .optional()
-    .describe("Nom projet pour les fichiers KiCad (défaut: nia-demo)"),
+    .describe("Nom projet pour les fichiers KiCad (défaut: basename du Projet ouvert)"),
   disableCdnLoading: z
     .boolean()
     .optional()
@@ -1185,17 +1190,19 @@ export function buildFactory() {
         outputSchema: PreviewScreenshotOutput,
         annotations: { readOnlyHint: true, destructiveHint: false },
       },
-      async ({ session_id, source, disableCdnLoading }) => {
+      async ({ session_id, source, name, disableCdnLoading }) => {
         const sessionId = session_id ?? "default";
         const projPrev = currentProjectPath();
-        // Override tests PCB_MCP_PREVIEW_DIR prioritaire (suites historiques), sinon dossier projet.
+        // Priorité <Projet ouvert>/previews/, fallback override tests / cache global.
         const previewOverride = (process.env.PCB_MCP_PREVIEW_DIR ?? "").trim();
-        const previewDirEff = previewOverride || (projPrev ? projectPreviewsDir(projPrev) : "");
+        const projectDir = projPrev ? projectPreviewsDir(projPrev) : "";
+        const previewDirEff = projectDir || previewOverride;
         if (!previewDirEff) {
           const err = noProjectError("preview_screenshot");
           const output = {
             sessionId,
             source: String(source ?? ""),
+            name: (typeof name === "string" ? name : null) as string | null,
             found: false,
             dataUrl: null,
             bytes: 0,
@@ -1213,7 +1220,10 @@ export function buildFactory() {
             structuredContent: output,
           };
         }
-        const read = readPreview(source ?? "", { dir: previewDirEff, disableCdnLoading });
+        let read = readPreview(source ?? "", { dir: previewDirEff, disableCdnLoading, name });
+        if (!read.found && previewOverride && previewOverride !== previewDirEff) {
+          read = readPreview(source ?? "", { dir: previewOverride, disableCdnLoading, name });
+        }
         if (read.found) {
           appendLog("info", "export", `preview_screenshot ${read.source} ok : ${read.bytes} octets`);
         } else {
@@ -1222,6 +1232,7 @@ export function buildFactory() {
         const output = {
           sessionId,
           source: String(read.source),
+          name: read.name,
           found: read.found,
           dataUrl: read.dataUrl,
           bytes: read.bytes,
@@ -1586,7 +1597,7 @@ export function buildFactory() {
         }
         const fab = await exportFab(compiled.circuitJson as unknown[], {
           projectName: (process.env.PCB_MCP_EXPORT_DIR ?? "").trim()
-            ? (project_name ?? "nia-demo")
+            ? (project_name ?? path.basename(projFab))
             : path.basename(projFab),
         });
         if (!fab.ok) {
