@@ -5,7 +5,6 @@ import { CadViewer } from "@tscircuit/3d-viewer";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Camera,
-  CircuitBoard,
   PanelBottom,
   RotateCw,
   TriangleAlert,
@@ -356,6 +355,10 @@ export default function App() {
           onCreate={handleCreate}
           onForget={handleForget}
           onDelete={handleDelete}
+          bridge={bridge}
+          boot={boot}
+          bridgeCopied={bridgeCopy.copied}
+          onCopyBridge={() => bridgeCopy.copy(bridge ? `node "${bridge}"` : "")}
         />
       </div>
     );
@@ -370,7 +373,7 @@ export default function App() {
       <header className="topbar">
         <div className="brand">
           <span className="brand-tile" aria-hidden="true">
-            <CircuitBoard size={16} aria-hidden="true" />
+            <img src="/logo.png" alt="" width={16} height={16} onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }} />
           </span>
           <div className="brand-text">
             <h1 translate="no">NIATSCIRCUIT Studio</h1>

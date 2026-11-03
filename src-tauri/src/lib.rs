@@ -351,6 +351,11 @@ pub fn run() {
             let handle = app.handle().clone();
             let state = boot_state_setup.clone();
             tauri::async_runtime::spawn(async move {
+                // Pont résolu ici aussi pour le cas échec : l'UI affiche
+                // toujours Copier même si le sidecar est KO.
+                let fallback_bridge = find_bridge(&handle)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 match boot_or_attach(&handle) {
                     Ok(info) => {
                         *state.lock().expect("boot state") = info;
@@ -358,6 +363,7 @@ pub fn run() {
                     Err(e) => {
                         // Jamais de token dans les logs.
                         eprintln!("[boot] échec: {e}");
+                        state.lock().expect("boot state").bridge_path = fallback_bridge;
                     }
                 }
             });

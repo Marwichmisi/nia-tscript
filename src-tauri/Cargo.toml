@@ -1,7 +1,7 @@
 [package]
 name = "nia-tscircuit-studio"
 version = "0.1.2"
-description = "NIATSCIRCUIT Studio — Tauri boot + lockfile single-flight (#9)"
+description = "Studio PCB agentique (Tauri + tscircuit), piloté par ton agent IA via MCP."
 authors = ["nia-tscircuit"]
 edition = "2021"
 

@@ -164,9 +164,14 @@ export function requireProjectPath(): string {
   return p;
 }
 
-/** Écrit lockfile.projectPath best-effort (partage Rust ↔ sidecar). Crée un lockfile minimal en test quand absent. */
+/** Écrit lockfile.projectPath best-effort (partage Rust ↔ sidecar).
+ * Prod : ne crée JAMAIS de lockfile (url/token requis pour le pont).
+ * Ne patch que si un lock valide existe déjà (préserve url/token).
+ * Tests isolés (`NIATSCIRCUIT_MCP_LOCK` ou `file` explicite) : minimal autorisé. */
 export function writeLockProjectPath(projectPath: string | null, file?: string): void {
+  const override = (process.env.NIATSCIRCUIT_MCP_LOCK ?? "").trim();
   const p = file ?? lockfilePath();
+  const isTestIsolation = file !== undefined || override.length > 0;
   try {
     const raw = fs.readFileSync(p, "utf8");
     const data = JSON.parse(raw) as Record<string, unknown>;
@@ -175,8 +180,10 @@ export function writeLockProjectPath(projectPath: string | null, file?: string):
     fs.writeFileSync(p, JSON.stringify(data, null, 2));
     return;
   } catch {
-    // lockfile absent (tests bun sans boot Tauri) : crée un minimal.
+    // lockfile absent/invalide : en prod on ne crée rien (évite
+    // d'écraser url/token par un minimal {projectPath} → -32000).
   }
+  if (!isTestIsolation) return;
   if (!projectPath) return;
   try {
     fs.mkdirSync(path.dirname(p), { recursive: true });
