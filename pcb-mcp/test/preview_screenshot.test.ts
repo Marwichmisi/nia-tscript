@@ -165,4 +165,24 @@ describe("S-preview-MCP — preview_screenshot agent", () => {
     expect(out.found).toBe(true);
     expect(out.banner).toMatch(/CDN|RÉSEAU/);
   });
+
+  test("SANS env, la résolution tombe DANS le Projet (#review-4)", async () => {
+    const saved = process.env.PCB_MCP_PREVIEW_DIR;
+    delete process.env.PCB_MCP_PREVIEW_DIR;
+    try {
+      const proj = currentProjectPath();
+      expect(proj).not.toBeNull();
+      savePreview(
+        { source: "pcb_2d", dataUrl: PIXEL_1X1, width: 1, height: 1 },
+        projectPreviewsDir(proj!),
+      );
+      const out = await callPreview({ source: "pcb_2d" });
+      expect(out.found).toBe(true);
+      expect(out.dataUrl).toBe(PIXEL_1X1);
+      expect(out.previewUrl?.startsWith("file://")).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env.PCB_MCP_PREVIEW_DIR;
+      else process.env.PCB_MCP_PREVIEW_DIR = saved;
+    }
+  });
 });

@@ -40,6 +40,30 @@ describe("#39 — pinning exact commun des deux moteurs", () => {
       expect(frontPkg.dependencies[dep], `${dep} aligné`).toBe(mcpPkg.dependencies[dep]);
     }
   });
+
+  test("revue #37 item 6 : tout @tscircuit/* + convertisseurs épinglé exact, des deux côtés", () => {
+    const mcpPkg = JSON.parse(
+      fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { dependencies: Record<string, string> };
+    const frontPkg = JSON.parse(
+      fs.readFileSync(new URL("../../src/package.json", import.meta.url), "utf8"),
+    ) as { dependencies: Record<string, string> };
+    const inScope = (name: string) =>
+      name.startsWith("@tscircuit/") ||
+      name.startsWith("circuit-json-to-") ||
+      name === "kicad-to-circuit-json" ||
+      name === "jszip";
+    for (const [side, deps] of [
+      ["pcb-mcp", mcpPkg.dependencies],
+      ["src", frontPkg.dependencies],
+    ] as const) {
+      for (const [name, ver] of Object.entries(deps)) {
+        if (!inScope(name)) continue;
+        expect(ver, `${side}:${name} exact`).not.toMatch(/^[\^~]/);
+        expect(ver, `${side}:${name} semver`).toMatch(/^\d+\.\d+\.\d+$/);
+      }
+    }
+  });
 });
 
 describe("#39 — diagnostics embarqués du circuit-json", () => {
@@ -95,6 +119,36 @@ describe("#39 — diagnostics embarqués du circuit-json", () => {
       { type: "pcb_component" },
     ]);
     expect(diags.filter((d) => d.severity === "error").length).toBe(2);
+    expect(diags.filter((d) => d.severity === "warning").length).toBe(1);
+  });
+
+  test("sous-chaîne error sans suffixe _error → aucun diagnostic (faux positif #review-1)", () => {
+    const diags = extractEmbeddedDiagnostics([
+      { type: "error_report" },
+      { type: "pcb_errorenous_flag" },
+      { type: "myerrorhandler" },
+    ]);
+    expect(diags).toEqual([]);
+  });
+
+  test("sous-chaîne warning sans suffixe _warning → aucun diagnostic (faux positif #review-1)", () => {
+    const diags = extractEmbeddedDiagnostics([
+      { type: "warning_track" },
+      { type: "warnings_enabled" },
+      { type: "mywarninghandler" },
+    ]);
+    expect(diags).toEqual([]);
+  });
+
+  test("cas réels validés : suffixe _error/_warning + casse mixte + type nu", () => {
+    const diags = extractEmbeddedDiagnostics([
+      { type: "source_invalid_component_property_error", message: "bad prop" },
+      { type: "pcb_footprint_overlap_error", message: "overlap" },
+      { type: "PCB_ERROR", message: "majuscules" },
+      { type: "error", message: "nu" },
+      { type: "WARNING", message: "nu warning" },
+    ]);
+    expect(diags.filter((d) => d.severity === "error").length).toBe(4);
     expect(diags.filter((d) => d.severity === "warning").length).toBe(1);
   });
 });

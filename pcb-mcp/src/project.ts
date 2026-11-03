@@ -348,6 +348,9 @@ export function listProjects(file?: string): { projects: ProjectListItem[]; last
 }
 
 /** Projet courant : lockfile `projectPath` > env `PCB_MCP_PROJECT_DIR` > null.
+ *  Le repli env est un hook de TEST (revue #37 item 4) : jamais posé par le
+ *  backend prod, non contrôlable via MCP — SANS env, la résolution tombe sur
+ *  le lockfile, donc DANS le Projet (défense en profondeur).
  *  Dossier supprimé (orphelin) → null (Accueil), jamais de chemin fantôme. */
 export function currentProjectPath(): string | null {
   try {

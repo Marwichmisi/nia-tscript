@@ -12,6 +12,7 @@ import { Client } from "@modelcontextprotocol/client";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { startServer } from "../src/http";
 import { resetStoreForTests } from "../src/state";
+import { currentProjectPath, projectExportDir } from "../src/project";
 import { ensureTestProject, setupIsolatedRegistry, type IsolatedEnv } from "./helpers";
 
 const TOKEN = "test-fab-" + Math.random().toString(36).slice(2);
@@ -178,5 +179,23 @@ describe("S9-B MCP — fab_export V1", () => {
     expect(out.message).toMatch(/DRC rouge/);
     expect(out.exportDir).toBe("");
     expect(out.artifacts).toEqual([]);
+  }, 120000);
+
+  test("#review-4 — SANS env, l'export tombe DANS le Projet", async () => {
+    const saved = process.env.PCB_MCP_EXPORT_DIR;
+    delete process.env.PCB_MCP_EXPORT_DIR;
+    try {
+      const out = await callFab({});
+      expect(out.errors).toBe(0);
+      expect(out.ready).toBe(true);
+      const proj = currentProjectPath();
+      expect(proj).not.toBeNull();
+      expect(out.exportDir.startsWith(projectExportDir(proj!))).toBe(true);
+      const fcu = fs.readFileSync(path.join(out.exportDir, "gerbers", "F_Cu.gbr"), "utf8");
+      expect(fcu).toMatch(/%TF\.|%FS/);
+    } finally {
+      if (saved === undefined) delete process.env.PCB_MCP_EXPORT_DIR;
+      else process.env.PCB_MCP_EXPORT_DIR = saved;
+    }
   }, 120000);
 });

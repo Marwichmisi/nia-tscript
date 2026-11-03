@@ -728,7 +728,15 @@ export default function App() {
           onCopyBridge={() => bridgeCopy.copy(bridge ? `node "${bridge}"` : "")}
         />
         {pendingDelete && (
-          <div className="modal-backdrop">
+          <div
+            className="modal-backdrop"
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.stopPropagation();
+                setPendingDelete(null);
+              }
+            }}
+          >
             <div
               className="modal"
               role="alertdialog"
@@ -928,20 +936,23 @@ export default function App() {
       )}
 
       <main id="viewer" className="viewer-main" aria-label={`Visualiseur ${TAB_LABEL[tab]}`} aria-busy={compiling}>
-        <div className="viewer-chips" aria-hidden="true">
-          <span className="viewer-chip">
+        {/* Pastilles décoratives masquées (l'onglet est déjà annoncé par
+            aria-label) ; le bouton moteur reste exposé au clavier/lecteur
+            d'écran (revue #37 item 8 : pas de focusable sous aria-hidden). */}
+        <div className="viewer-chips">
+          <span className="viewer-chip" aria-hidden="true">
             {TAB_LABEL[tab]} · <code translate="no">{KIND[tab]}</code>
           </span>
-          <span className="viewer-chip">{stats.total} éléments</span>
+          <span className="viewer-chip" aria-hidden="true">{stats.total} éléments</span>
           {tab === "pcb" && (
             <button
               type="button"
               className="viewer-chip"
               title="Moteur PCB : canvas = sans GPU, webgpu = expérimental"
+              aria-label={`Moteur de rendu PCB : ${pcbRenderer} — activer pour basculer`}
               onClick={() =>
                 setPcbRenderer((r) => (r === "canvas" ? "webgpu" : "canvas"))
               }
-              aria-hidden="false"
             >
               PCB: {pcbRenderer}
             </button>
@@ -1062,7 +1073,16 @@ export default function App() {
       )}
 
       {pasteOpen && (
-        <div className="modal-backdrop">
+        <div
+          className="modal-backdrop"
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              e.stopPropagation();
+              setPasteOpen(false);
+              setPasteError(null);
+            }
+          }}
+        >
           <div
             className="modal modal-wide"
             role="dialog"
@@ -1089,6 +1109,7 @@ export default function App() {
               spellCheck={false}
               translate="no"
               placeholder="export default () => (…)"
+              autoFocus
             />
             {pasteError && (
               <p className="modal-error" role="alert">

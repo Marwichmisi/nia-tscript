@@ -123,7 +123,7 @@ async function callJailTool(name: string, args: Record<string, unknown> = {}): P
   }
 }
 
-describe("Confinement : jail des 5 commandes dossier (MCP)", () => {
+describe("Confinement : jail des 6 commandes dossier (MCP)", () => {
   let memberDir = "";
   let outsideDir = "";
 
@@ -192,6 +192,11 @@ describe("Confinement : jail des 5 commandes dossier (MCP)", () => {
   test("fab_export hors périmètre → refus explicite, aucun export", async () => {
     const out = await withOutsideLock(() => callJailTool("fab_export", {}));
     expect(out["ready"]).toBe(false);
+    expect(String(out["message"] ?? JSON.stringify(out))).toMatch(/hors périmètre/);
+  });
+
+  test("search_parts hors périmètre → refus explicite (#review-3)", async () => {
+    const out = await withOutsideLock(() => callJailTool("search_parts", { query: "R0603" }));
     expect(String(out["message"] ?? JSON.stringify(out))).toMatch(/hors périmètre/);
   });
 

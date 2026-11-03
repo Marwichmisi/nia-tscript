@@ -138,8 +138,33 @@ describe("S10 — op route pure (ticket #44)", () => {
     );
   });
 
-  test("boardExpectsRouting : vrai quand le TSX déclare des traces", () => {
+  test("boardExpectsRouting : commentaire // <trace → pas de routage attendu (#review-2)", () => {
+    const onlyComment = `export default () => (
+  // <trace from=".R1 > .pin1" to="net.VCC" />
+  <board width="20mm" height="20mm">
+    <resistor name="R1" resistance="10k" footprint="0402" pcbX={-5} pcbY={4} />
+  </board>
+)`;
+    expect(boardExpectsRouting(onlyComment)).toBe(false);
+    const blockComment = `export default () => (
+  <board width="20mm" height="20mm">
+    {/* <trace from=".R1 > .pin1" to="net.VCC" /> */}
+    <resistor name="R1" resistance="10k" footprint="0402" pcbX={-5} pcbY={4} />
+  </board>
+)`;
+    expect(boardExpectsRouting(blockComment)).toBe(false);
     expect(boardExpectsRouting(BOARD_CODE)).toBe(true);
-    expect(boardExpectsRouting(`export default () => null`)).toBe(false);
+  });
+
+  test("boardRoutingDisabled : commentaire routingDisabled → pas d'interdit (#review-2)", () => {
+    const lineComment = `// routingDisabled\nexport default () => (\n  <board width="20mm" height="20mm">\n  </board>\n)`;
+    expect(boardRoutingDisabled(lineComment)).toBe(false);
+    const blockComment = `export default () => (\n  /* routingDisabled */\n  <board width="20mm" height="20mm">\n  </board>\n)`;
+    expect(boardRoutingDisabled(blockComment)).toBe(false);
+    const commentInTag = BOARD_CODE.replace(`<board width=`, `<board /* routingDisabled */ width=`);
+    expect(boardRoutingDisabled(commentInTag)).toBe(false);
+    expect(
+      boardRoutingDisabled(BOARD_CODE.replace(`<board width=`, `<board routingDisabled width=`)),
+    ).toBe(true);
   });
 });

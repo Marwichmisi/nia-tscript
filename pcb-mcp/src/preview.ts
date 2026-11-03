@@ -45,7 +45,10 @@ export function normalizePreviewSource(
   };
 }
 
-/** Dossier partagé WebView ↔ sidecar. Override tests via `PCB_MCP_PREVIEW_DIR`. */
+/** Dossier partagé WebView ↔ sidecar. Override tests via `PCB_MCP_PREVIEW_DIR`.
+ *  Hook de TEST (revue #37 item 4) : jamais posé par le backend prod, non
+ *  contrôlable via MCP — SANS env, le handler `preview_screenshot` lit dans
+ *  `<projet>/previews/` en priorité (défense en profondeur). */
 export function previewDir(): string {
   const override = (process.env.PCB_MCP_PREVIEW_DIR ?? "").trim();
   if (override) return override;

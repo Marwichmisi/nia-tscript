@@ -58,6 +58,7 @@ jobs:
           bun scripts/build.mjs
           bun test
           bun run typecheck || echo "::warning::typecheck pcb-mcp non bloquant (dette #40)"
+          bun scripts/check-types.mjs
 
       - name: sidecar — tests Rust
         working-directory: src-tauri

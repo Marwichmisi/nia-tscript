@@ -32,7 +32,10 @@ export function sanitizeSegment(s: string): string {
   return t || "default";
 }
 
-/** Dossier d'artefacts fab. Override tests via `PCB_MCP_EXPORT_DIR`. */
+/** Dossier d'artefacts fab. Override tests via `PCB_MCP_EXPORT_DIR`.
+ *  Hook de TEST (revue #37 item 4) : jamais posé par le backend prod, non
+ *  contrôlable via MCP — SANS env, le handler `fab_export` résout dans
+ *  `<projet>/exports/<basename>-<hash12>` (défense en profondeur). */
 export function fabExportBaseDir(): string {
   const override = (process.env.PCB_MCP_EXPORT_DIR ?? "").trim();
   if (override) return override;
