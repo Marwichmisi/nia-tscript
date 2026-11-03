@@ -156,14 +156,49 @@ function Thread({ chat, compact }: { chat: Chat; compact?: boolean }) {
   );
 }
 
-function Composer({ chat, modelPicker }: { chat: Chat; modelPicker?: React.ReactNode }) {
+/** Barre de saisie unifiée (variante B) : input + contrôles intégrés dans la même
+ *  barre arrondie — [+] [mode pill] … [modèle pill] [envoi]. D'après les captures
+ *  du porteur. Selects natifs en mock (la vraie liste viendra de GET /v1/models). */
+function ComposerBar({ chat }: { chat: Chat }) {
+  const [v, setV] = useState("");
+  const pill: React.CSSProperties = { border: "none", background: "transparent", fontSize: 12, color: "#5f6368", maxWidth: 190 };
+  return (
+    <div style={{ margin: 8, border: "1px solid #dadce0", borderRadius: 16, padding: "8px 8px 6px", background: "#fff" }}>
+      <input
+        value={v}
+        onChange={(e) => setV(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); chat.send(v); setV(""); } }}
+        placeholder="Message or run a task, / commands, @ files or sessions (mock)"
+        aria-label="chat"
+        style={{ width: "100%", boxSizing: "border-box", border: "none", outline: "none", padding: 6, fontSize: 13 }}
+      />
+      <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 2 }}>
+        <button title="Joindre (mock, sans effet)" style={{ border: "1px solid #dadce0", borderRadius: "50%", width: 26, height: 26 }} onClick={() => chat.send("joint une pièce (mock)")}>+</button>
+        <select value={chat.mode} onChange={(e) => chat.setMode(e.target.value as Mode)} aria-label="Mode d'approbation" style={pill} title="Mode d'approbation">
+          <option value="manuel">Manuel (1 approval/lot)</option>
+          <option value="auto">Full access (auto)</option>
+        </select>
+        <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 4 }}>
+          <select value={chat.model} onChange={(e) => chat.switchModel(e.target.value)} aria-label="Modèle" style={pill} title="Modèle (mock)">
+            <optgroup label="meta">
+              {MOCK_MODELS.map((m) => (
+                <option key={m} value={m}>{m} (mock)</option>
+              ))}
+            </optgroup>
+          </select>
+          <button onClick={() => { chat.send(v); setV(""); }} disabled={chat.streaming} aria-label="Envoyer" style={{ borderRadius: "50%", width: 30, height: 30 }}>↑</button>
+        </span>
+      </div>
+    </div>
+  );
+}
+function Composer({ chat }: { chat: Chat }) {
   const [v, setV] = useState("");
   return (
     <form
       onSubmit={(e) => { e.preventDefault(); chat.send(v); setV(""); }}
       style={{ display: "flex", gap: 6, padding: 8, borderTop: "1px solid #dadce0", alignItems: "center" }}
     >
-      {modelPicker}
       <input
         value={v}
         onChange={(e) => setV(e.target.value)}
@@ -251,11 +286,10 @@ function VariantB({ chat }: { chat: Chat }) {
           <div style={{ ...PANEL, width: 380, margin: "8px 8px 8px 0" }}>
             <div style={{ padding: 8, borderBottom: "1px solid #eee", fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
               Agent IA
-              <ModeToggle chat={chat} />
               <button onClick={() => setOpen(false)} style={{ marginLeft: "auto" }} aria-label="Replier">→</button>
             </div>
             <Thread chat={chat} compact />
-            <Composer chat={chat} modelPicker={<ModelPicker chat={chat} />} />
+            <ComposerBar chat={chat} />
           </div>
         )}
       </div>
