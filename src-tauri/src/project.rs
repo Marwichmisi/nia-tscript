@@ -205,6 +205,17 @@ pub fn read_main_file(dir: &Path) -> Result<MainFileData, String> {
     })
 }
 
+/// Écriture atomique de `main.tsx` (ticket #45 : coller du TSX, gabarit démo).
+/// Tmp+rename+fsync via `boot::atomic_write`, puis relecture (path/code/hash).
+/// Le Confinement (appartenance au Registre) est vérifié par l'appelant
+/// (commande Tauri) : jamais d'écriture hors périmètre.
+pub fn write_main_file(dir: &Path, code: &str) -> Result<MainFileData, String> {
+    let main = project_paths(dir).main;
+    crate::boot::atomic_write(&main, code.as_bytes())
+        .map_err(|e| format!("écriture main.tsx : {e}"))?;
+    read_main_file(dir)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CircuitInit {
     Created,
@@ -842,6 +853,36 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let err = read_main_file(&base).expect_err("sans main.tsx → erreur");
         assert!(err.contains("lecture main.tsx"), "erreur explicite : {err}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // --- Ticket #45 : écriture main.tsx (coller du TSX, gabarit démo) -------
+
+    #[test]
+    fn ecrit_main_puis_relire_hash_coherent() {
+        let base = std::env::temp_dir().join(format!("nia-writemain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let got = write_main_file(&base, "code-marqueur").expect("écrit main");
+        assert_eq!(got.code, "code-marqueur");
+        assert_eq!(got.path, base.join("main.tsx").to_string_lossy());
+        assert_eq!(got.hash, crate::watch::hash_main_content(b"code-marqueur"));
+        // Relecture disque identique (source de vérité).
+        let relu = read_main_file(&base).expect("relit main");
+        assert_eq!(relu.hash, got.hash);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn ecrit_main_ecrase_et_rearme_le_hash() {
+        let base =
+            std::env::temp_dir().join(format!("nia-writemain-2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let premier = write_main_file(&base, "v1").expect("écrit v1");
+        let second = write_main_file(&base, "v2llllllllll").expect("écrit v2");
+        assert_ne!(premier.hash, second.hash, "le hash suit le contenu");
+        assert_eq!(read_main_file(&base).unwrap().code, "v2llllllllll");
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -24,6 +24,10 @@ interface HomeProps {
 export function Home({ projects, lastOpened, busy, error, onOpen, onCreate, onForget, onRelink, onDelete, bridge, boot, bridgeCopied, onCopyBridge }: HomeProps) {
   const [template, setTemplate] = useState<"vide" | "demo">("vide");
   const empty = projects.length === 0;
+  // Ticket #45, US10 : pendant le démarrage le pont n'est pas encore là —
+  // le bouton Copier est désactivé AVEC explication (fini le faux négatif
+  // « Pont introuvable » qui faisait croire au pont KO).
+  const booting = !bridge && boot === "démarrage…";
 
   async function pickAndCreate() {
     try {
@@ -70,7 +74,16 @@ export function Home({ projects, lastOpened, busy, error, onOpen, onCreate, onFo
         <div className="home-bridge" style={{ margin: "12px 0", padding: "10px 12px", border: "1px solid var(--border, #27272a)", borderRadius: 8 }}>
           <div style={{ fontWeight: 600, marginBottom: 4 }}>Pont MCP — connexion agent</div>
           <div className="term-truncate" style={{ fontSize: 12, opacity: 0.85 }}>Sidecar : {boot}</div>
-          {bridge ? (
+          {booting ? (
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6, flexWrap: "wrap" }}>
+              <Button variant="outline" size="sm" disabled title="Pont en cours de démarrage — la commande arrive quand le sidecar est prêt">
+                <Copy size={13} aria-hidden="true" /> Copier la commande
+              </Button>
+              <span className="term-muted" style={{ fontSize: 12 }} role="status">
+                Pont en cours de démarrage… (le sidecar se lance — la commande arrive quand il est prêt).
+              </span>
+            </div>
+          ) : bridge ? (
             <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6, flexWrap: "wrap" }}>
               <code translate="no" style={{ fontSize: 12 }}>{bridge}</code>
               <Button variant="outline" size="sm" onClick={onCopyBridge}>
@@ -133,7 +146,7 @@ export function Home({ projects, lastOpened, busy, error, onOpen, onCreate, onFo
                 </button>
                 <span className="home-meta">
                   {p.path === lastOpened && <Badge variant="default">dernier</Badge>}
-                  {!p.exists && <Badge variant="destructive">introuvable</Badge>}
+                  {!p.exists && <Badge variant="destructive">orphelin — dossier introuvable</Badge>}
                   {!p.exists && (
                     <Button variant="outline" size="sm" onClick={() => void pickAndRelink(p.path)} disabled={busy} aria-label={`Relier ${p.path} vers un nouveau dossier`}>
                       Relier…

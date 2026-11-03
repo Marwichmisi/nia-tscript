@@ -25,11 +25,13 @@ import {
   forgetProject as forgetProj,
   isMainOfProject,
   relinkProject as relinkProj,
+  requestDeleteToken as requestDelToken,
   listProjects,
   openProject as openProj,
   projectName,
   readProjectMain,
   shortHash,
+  writeProjectMain as writeProjMain,
   type ProjectItem,
 } from "./lib/projects";
 import { ViewerErrorBoundary } from "./components/ErrorBoundary";
@@ -195,6 +197,19 @@ export default function App() {
   const [shotName, setShotName] = useState("");
   const [manifoldStatus, setManifoldStatus] = useState<"loading" | "ready" | "error">("loading");
   const [manifoldError, setManifoldError] = useState<string | null>(null);
+  /** Suppression avec garde backend (ticket #42) : le dialogue natif seul ne
+   *  suffit plus — `pendingDelete` ouvre la confirmation, qui demande un
+   *  jeton usage unique avant `delete_project`. */
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  /** Coller du TSX (ticket #45, Projet vide) : dialogue + zone de texte,
+   *  pré-remplie du presse-papiers quand disponible. */
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteText, setPasteText] = useState("");
+  const [pasteBusy, setPasteBusy] = useState(false);
+  const [pasteError, setPasteError] = useState<string | null>(null);
+  /** Compteur de compiles terminées : la frontière d'erreur repart saine à
+   *  chaque nouveau circuit-json (ticket #45). */
+  const [compileSeq, setCompileSeq] = useState(0);
   const [pcbRenderer, setPcbRenderer] = useState<"webgpu" | "canvas">(() => initialPcbRenderer());
   const tsxCopy = useCopyFeedback();
   const bridgeCopy = useCopyFeedback();
@@ -202,7 +217,12 @@ export default function App() {
 
   const log = useCallback(
     (msg: string) =>
-      setLogs((l) => [...l.slice(-99), `[${new Date().toISOString().slice(11, 19)}] ${msg}`]),
+      setLogs((l) => {
+        // Anti-forgery (ticket #45) : les retours ligne embarqués (backend,
+        // compile) ne doivent pas forger de fausses lignes de log.
+        const clean = msg.replace(/[\r\n]+/g, " ⏎ ");
+        return [...l.slice(-99), `[${new Date().toISOString().slice(11, 19)}] ${clean}`];
+      }),
     [],
   );
 
@@ -404,12 +424,98 @@ export default function App() {
   }
 
   async function handleDelete(p: string) {
-    if (!window.confirm(`Supprimer le dossier projet ?\n${p}`)) return;
-    await withProjBusy(async () => {
-      await deleteProj(p);
+    // Plus de window.confirm destructeur : la confirmation passe par le
+    // dialogue dédié, qui exige le jeton backend (#42).
+    setPendingDelete(p);
+  }
+
+  async function confirmDelete() {
+    const p = pendingDelete;
+    if (!p || projBusy) return;
+    setPendingDelete(null);
+    setProjBusy(true);
+    setProjError(null);
+    try {
+      const token = await requestDelToken(p);
+      await deleteProj(p, token);
+      pushToast("ok", `Projet supprimé (confirmation backend) : ${projectName(p)}`);
+      log(`suppression confirmée backend : ${p}`);
       const cur = await currentProject().catch(() => null);
       setProjectPath(cur);
       await refreshProjects();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setProjError(msg);
+      pushToast("error", `Suppression refusée : ${msg}`);
+    } finally {
+      setProjBusy(false);
+    }
+  }
+
+  /** Colle du TSX dans le Projet vide (ticket #45, US6) : écriture atomique
+   *  + hash relu, le watcher #43 resynchronise le reste. Garde anti-course :
+   *  si l'agent a écrit entre-temps, on relit au lieu d'écraser. */
+  async function openPasteDialog() {
+    setPasteError(null);
+    try {
+      const t = await navigator.clipboard?.readText();
+      setPasteText(typeof t === "string" ? t : "");
+    } catch {
+      setPasteText("");
+    }
+    setPasteOpen(true);
+  }
+
+  async function savePastedTsx() {
+    if (!projectPath || pasteBusy) return;
+    if (!pasteText.trim()) {
+      setPasteError("Rien à enregistrer — colle du TSX d'abord.");
+      return;
+    }
+    setPasteBusy(true);
+    setPasteError(null);
+    try {
+      const fresh = await readProjectMain(projectPath);
+      if (fresh.code.trim() !== "") {
+        setProjectCode(fresh.code);
+        setKnownHash(fresh.hash);
+        throw new Error("le Projet n'est plus vide (écriture concurrente) — contenu relu, rien écrasé");
+      }
+      const saved = await writeProjMain(projectPath, pasteText);
+      setProjectCode(saved.code);
+      setKnownHash(saved.hash);
+      setReadError(null);
+      setPasteOpen(false);
+      setPasteText("");
+      pushToast("ok", `TSX collé ✓ (hash ${shortHash(saved.hash)})`);
+      log(`TSX collé depuis le Studio (hash ${shortHash(saved.hash)})`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setPasteError(msg);
+      pushToast("error", `Échec enregistrement : ${msg}`);
+    } finally {
+      setPasteBusy(false);
+    }
+  }
+
+  /** Charge le gabarit démo dans le Projet vide (même source que le flux
+   *  création : BOARD_CODE == DEMO_CODE backend). */
+  async function handleLoadDemo() {
+    if (!projectPath || projBusy) return;
+    await withProjBusy(async () => {
+      const fresh = await readProjectMain(projectPath);
+      if (fresh.code.trim() !== "") {
+        setProjectCode(fresh.code);
+        setKnownHash(fresh.hash);
+        pushToast("info", "Le Projet n'est plus vide — gabarit non chargé");
+        return;
+      }
+      const saved = await writeProjMain(projectPath, BOARD_CODE);
+      setProjectCode(saved.code);
+      setKnownHash(saved.hash);
+      setReadError(null);
+      pushToast("ok", `Gabarit démo chargé ✓ (hash ${shortHash(saved.hash)})`);
+      log(`gabarit démo chargé (hash ${shortHash(saved.hash)})`);
     });
   }
 
@@ -428,6 +534,8 @@ export default function App() {
       setCircuitJson(r.circuitJson);
       setMode(r.mode);
       setBanner(r.banner);
+      // Nouveau circuit-json : la frontière d'erreur repart saine (#45).
+      setCompileSeq((n) => n + 1);
     });
     return () => {
       alive = false;
@@ -547,6 +655,11 @@ export default function App() {
   const stats = computeStats(circuitJson);
   const ready = mode === "worker-blob-local" || mode === "worker-blob-local-nocdn";
   const compiling = mode === "compilation…";
+  /** Projet vide explicite (ticket #45, US6) : ni erreur de lecture, ni
+   *  échec de compile — juste 0 composant. À ne plus confondre avec un
+   *  échec de compilation (mode `echec` + bandeau d'erreur). */
+  const isEmptyProject =
+    !compiling && !readError && mode !== "echec" && circuitJson.length === 0;
   const viewerHeight = useElementHeight(viewRef);
 
   async function onShot() {
@@ -581,10 +694,14 @@ export default function App() {
         height: r.height,
         previewUrl,
       });
+      pushToast("ok", `Capture ${KIND[tab]} ✓ — ${r.bytes} octets${previewUrl ? " (preview locale)" : " (download seul)"}`);
+      log(`capture ${r.source} (${r.bytes} o)${previewUrl ? " + preview locale" : ""}`);
       setTermTab("shot");
       setTermCollapsed(false);
     } catch (e) {
-      setShotErr(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      setShotErr(msg);
+      pushToast("error", `Échec capture : ${msg}`);
       setTermTab("shot");
       setTermCollapsed(false);
     } finally {
@@ -610,6 +727,44 @@ export default function App() {
           bridgeCopied={bridgeCopy.copied}
           onCopyBridge={() => bridgeCopy.copy(bridge ? `node "${bridge}"` : "")}
         />
+        {pendingDelete && (
+          <div className="modal-backdrop">
+            <div
+              className="modal"
+              role="alertdialog"
+              aria-modal="true"
+              aria-labelledby="del-title"
+              aria-describedby="del-desc"
+            >
+              <h2 id="del-title">Supprimer le dossier projet ?</h2>
+              <p id="del-desc">
+                <code translate="no">{pendingDelete}</code>
+                <br />
+                Cette action supprime DÉFINITIVEMENT le dossier (pas de
+                corbeille en V1). La suppression exige une confirmation
+                backend à jeton unique — l'oubli, lui, ne touche jamais au
+                disque.
+              </p>
+              <div className="modal-actions">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPendingDelete(null)}
+                  autoFocus
+                >
+                  Annuler
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={() => void confirmDelete()}
+                  disabled={projBusy}
+                >
+                  Supprimer définitivement
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -695,7 +850,12 @@ export default function App() {
               variant="default"
               size="sm"
               onClick={onShot}
-              disabled={shotBusy || circuitJson.length === 0}
+              disabled={shotBusy || compiling || circuitJson.length === 0}
+              title={
+                compiling
+                  ? "Désactivé pendant la compilation (l'image serait obsolète)"
+                  : "Capturer l'onglet courant pour l'agent"
+              }
             >
               <Camera size={14} aria-hidden="true" />
               {shotBusy ? "Capture…" : "Screenshot"}
@@ -788,14 +948,34 @@ export default function App() {
           )}
         </div>
         <div ref={viewRef} className="viewer-body">
-          {circuitJson.length === 0 ? (
+          {isEmptyProject ? (
+            <div className="viewer-empty-project" role="status">
+              <div className="viewer-empty-title">
+                Projet vide — board 20×20 mm, 0 composant.
+              </div>
+              <p className="term-muted">
+                {projectCode.trim() === ""
+                  ? "Le main.tsx est vide : ce n'est pas une erreur de compilation."
+                  : "Le circuit ne contient aucun composant : ce n'est pas une erreur de compilation."}{" "}
+                Charge le gabarit démo ou colle ton TSX pour commencer.
+              </p>
+              <div className="viewer-empty-actions">
+                <Button size="sm" onClick={() => void handleLoadDemo()} disabled={projBusy}>
+                  Charger le gabarit démo
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => void openPasteDialog()}>
+                  Coller du TSX…
+                </Button>
+              </div>
+            </div>
+          ) : circuitJson.length === 0 ? (
             <div className="viewer-empty">
               {compiling
                 ? "Compilation partagée en cours…"
                 : "Pas de circuit-json — ouvre la Console du terminal pour le diagnostic."}
             </div>
           ) : (
-            <ViewerErrorBoundary tabName={tab}>
+            <ViewerErrorBoundary tabName={tab} resetKey={`${tab}:${compileSeq}`}>
                 {tab === "schema" ? (
                   <SchematicViewer circuitJson={circuitJson as never} />
                 ) : tab === "pcb" ? (
@@ -868,6 +1048,7 @@ export default function App() {
         onShotNameChange={setShotName}
         source={KIND[tab]}
         onShot={onShot}
+        compileBusy={compiling}
       />
 
       {toasts.length > 0 && (
@@ -877,6 +1058,59 @@ export default function App() {
               {t.msg}
             </div>
           ))}
+        </div>
+      )}
+
+      {pasteOpen && (
+        <div className="modal-backdrop">
+          <div
+            className="modal modal-wide"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="paste-title"
+            aria-describedby="paste-desc"
+          >
+            <h2 id="paste-title">Coller du TSX</h2>
+            <p id="paste-desc" className="term-muted">
+              Le contenu sera écrit dans <code translate="no">main.tsx</code> du
+              Projet ouvert (écriture atomique, relecture par hash). Proposé
+              uniquement quand le Projet est vide — si l'agent a écrit
+              entre-temps, rien n'est écrasé.
+            </p>
+            <label htmlFor="paste-tsx" className="modal-label">
+              Code TSX
+            </label>
+            <textarea
+              id="paste-tsx"
+              className="modal-textarea"
+              value={pasteText}
+              onChange={(e) => setPasteText(e.target.value)}
+              rows={10}
+              spellCheck={false}
+              translate="no"
+              placeholder="export default () => (…)"
+            />
+            {pasteError && (
+              <p className="modal-error" role="alert">
+                {pasteError}
+              </p>
+            )}
+            <div className="modal-actions">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setPasteOpen(false);
+                  setPasteError(null);
+                }}
+              >
+                Annuler
+              </Button>
+              <Button size="sm" onClick={() => void savePastedTsx()} disabled={pasteBusy}>
+                {pasteBusy ? "Enregistrement…" : "Enregistrer"}
+              </Button>
+            </div>
+          </div>
         </div>
       )}
     </div>

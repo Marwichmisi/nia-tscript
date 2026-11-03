@@ -471,6 +471,23 @@ fn read_project_main(
     })
 }
 
+#[tauri::command]
+fn write_project_main(path: String, code: String) -> Result<ProjectMain, String> {
+    // Ticket #45 (coller du TSX, gabarit démo) : écriture frontend autrement
+    // impossible (l'agent écrit via MCP). Même jail que la lecture
+    // (Confinement #42), écriture atomique + hash relu (#38 source de vérité).
+    // Le watcher (#43) émet `project-main-changed` sur le fichier modifié :
+    // la WebView resynchronise sans relecture forcée.
+    let reg = load_registry();
+    let dir = project::assert_project_member(&path, &reg)?;
+    let data = project::write_main_file(&dir, &code)?;
+    Ok(ProjectMain {
+        path: data.path,
+        code: data.code,
+        hash: data.hash,
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let boot_state = Arc::new(Mutex::new(BootState::default()));
@@ -544,7 +561,8 @@ pub fn run() {
             relink_project,
             request_delete_token,
             delete_project,
-            read_project_main
+            read_project_main,
+            write_project_main
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
