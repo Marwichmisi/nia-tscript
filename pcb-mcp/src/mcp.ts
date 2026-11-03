@@ -39,6 +39,8 @@ import {
 } from "./state.js";
 import {
   NO_PROJECT_OPEN,
+  OUT_OF_SCOPE,
+  assertProjectMember,
   canonicalProjectPath,
   currentProjectPath,
   ensureCircuitFile,
@@ -121,6 +123,21 @@ function noProjectError(code: string): { message: string; code: string } {
     message: `aucun projet ouvert : ouvre un projet dans l'app ou via project_open (${code})`,
     code: NO_PROJECT_OPEN,
   };
+}
+
+/** Jail Confinement (ticket #42) : le Projet courant (lockfile) doit être
+ *  membre du Registre après canonicalisation. Retourne `null` si le jail
+ *  passe, sinon l'erreur explicite hors périmètre (à fusionner dans la
+ *  sortie de refus de l'outil, comme `noProjectError`).
+ *  `null` projet → `null` aussi (l'appelant garde son `NO_PROJECT_OPEN`). */
+function checkConfined(tool: string, proj: string | null): { message: string; code: string } | null {
+  if (!proj) return null;
+  try {
+    assertProjectMember(proj);
+    return null;
+  } catch (e) {
+    return { message: `${(e as Error).message} (${tool})`, code: OUT_OF_SCOPE };
+  }
 }
 
 function loadCodeForProject(projectPath: string): void {
@@ -689,8 +706,10 @@ export function buildFactory() {
         return enqueue(async () => {
           const sessionId = session_id ?? "default";
           const proj = currentProjectPath();
-          if (!proj) {
-            const err = noProjectError("code_patch");
+          // Jail Confinement (#42) : écriture refusée hors Registre.
+          const scopeErr = checkConfined("code_patch", proj);
+          if (!proj || scopeErr) {
+            const err = scopeErr ?? noProjectError("code_patch");
             const output = {
               sessionId,
               applied: false as const,
@@ -906,8 +925,10 @@ export function buildFactory() {
       },
       async ({ session_id, op, refdes, x, y, degrees, footprint, pin, net, disableCdnLoading }) => {
         const projLive = currentProjectPath();
-        if (!projLive) {
-          const err = noProjectError("live_manage");
+        // Jail Confinement (#42) : lecture/écriture refusées hors Registre.
+        const scopeErrLive = checkConfined("live_manage", projLive);
+        if (!projLive || scopeErrLive) {
+          const err = scopeErrLive ?? noProjectError("live_manage");
           const output = {
             sessionId: session_id ?? "default",
             op: (op ?? "").trim(),
@@ -1216,6 +1237,32 @@ export function buildFactory() {
       async ({ session_id, source, name, disableCdnLoading }) => {
         const sessionId = session_id ?? "default";
         const projPrev = currentProjectPath();
+        // Jail Confinement (#42) : lecture capture refusée hors Registre
+        // (sans repli vers le cache global — un projet ouvert hors périmètre
+        // ne doit ni lire son dossier ni fuir vers un autre).
+        const scopeErrPrev = checkConfined("preview_screenshot", projPrev);
+        if (scopeErrPrev) {
+          const output = {
+            sessionId,
+            source: String(source ?? ""),
+            name: (typeof name === "string" ? name : null) as string | null,
+            found: false,
+            dataUrl: null,
+            bytes: 0,
+            width: null,
+            height: null,
+            previewUrl: null,
+            updatedAt: null,
+            banner: null,
+            message: scopeErrPrev.message,
+            errors: 1,
+            warnings: 0,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify({ ...output, ...scopeErrPrev }) }],
+            structuredContent: output,
+          };
+        }
         // Priorité <Projet ouvert>/previews/, fallback override tests / cache global.
         const previewOverride = (process.env.PCB_MCP_PREVIEW_DIR ?? "").trim();
         const projectDir = projPrev ? projectPreviewsDir(projPrev) : "";
@@ -1294,8 +1341,10 @@ export function buildFactory() {
         return enqueue(async () => {
           const sessionId = session_id ?? "default";
           const projBatch = currentProjectPath();
-          if (!projBatch) {
-            const err = noProjectError("batch_execute");
+          // Jail Confinement (#42) : lot atomique refusé hors Registre.
+          const scopeErrBatch = checkConfined("batch_execute", projBatch);
+          if (!projBatch || scopeErrBatch) {
+            const err = scopeErrBatch ?? noProjectError("batch_execute");
             const output = {
               sessionId,
               applied: false as const,
@@ -1602,8 +1651,10 @@ export function buildFactory() {
       },
       async ({ session_id, project_name, disableCdnLoading }) => {
         const projFab = currentProjectPath();
-        if (!projFab) {
-          const err = noProjectError("fab_export");
+        // Jail Confinement (#42) : export refusé hors Registre.
+        const scopeErrFab = checkConfined("fab_export", projFab);
+        if (!projFab || scopeErrFab) {
+          const err = scopeErrFab ?? noProjectError("fab_export");
           const output = {
             sessionId: session_id ?? "default",
             ready: false as const,

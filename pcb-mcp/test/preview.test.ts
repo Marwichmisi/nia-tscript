@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   normalizePreviewSource,
+  previewCount,
   previewFilePath,
   savePreview,
   readPreview,
@@ -96,5 +97,47 @@ describe("S-preview-pur — store screenshot agent", () => {
     expect(NO_GPU_FALLBACK).toMatch(/WebGPU|fallback/);
     const read = readPreview("pcb_3d", { dir, disableCdnLoading: true });
     expect(read.banner).toMatch(/CDN|RÉSEAU/);
+  });
+});
+
+describe("Ticket #42 — quotas captures (20 Mo max, 50 fichiers LRU + compteur)", () => {
+  test("au-delà de 20 Mo → refus explicite, rien écrit", () => {
+    // PNG valide (magie) rembourré au-delà du plafond — source indépendante.
+    const big = Buffer.alloc(21 * 1024 * 1024);
+    big[0] = 0x89;
+    big[1] = 0x50;
+    big[2] = 0x4e;
+    big[3] = 0x47;
+    const dataUrl = `data:image/png;base64,${big.toString("base64")}`;
+    expect(() =>
+      savePreview({ source: "pcb_2d", dataUrl, width: 10, height: 10, name: "trop-gros" }, dir),
+    ).toThrow(/20 Mo/);
+    expect(fs.existsSync(previewFilePath("pcb_2d", dir, "trop-gros"))).toBe(false);
+  });
+
+  test("51e capture → éviction la moins récente, plafond 50 + compteur exposé", () => {
+    const names: string[] = [];
+    for (let i = 0; i < 50; i++) {
+      const n = `shot-${String(i).padStart(2, "0")}`;
+      names.push(n);
+      savePreview({ source: "pcb_2d", dataUrl: PIXEL_1X1, width: 1, height: 1, name: n }, dir);
+    }
+    // Vieillit artificiellement dans l'ordre d'arrivée (déterministe).
+    const now = Date.now();
+    names.forEach((n, i) => {
+      const t = new Date(now - (names.length - i) * 1000);
+      fs.utimesSync(previewFilePath("pcb_2d", dir, n), t, t);
+    });
+    const last = savePreview(
+      { source: "pcb_2d", dataUrl: PIXEL_1X1, width: 1, height: 1, name: "shot-50" },
+      dir,
+    );
+    expect(last.evicted).toBeGreaterThanOrEqual(1);
+    expect(last.totalFiles).toBe(50);
+    expect(fs.existsSync(previewFilePath("pcb_2d", dir, "shot-00"))).toBe(false);
+    expect(fs.existsSync(previewFilePath("pcb_2d", dir, "shot-50"))).toBe(true);
+    const { files, bytes } = previewCount(dir);
+    expect(files).toBe(50);
+    expect(bytes).toBeGreaterThan(0);
   });
 });

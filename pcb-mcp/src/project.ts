@@ -97,6 +97,10 @@ export function ensureCircuitFile(projectPath: string): "created" | "migrated" |
 
 export const NO_PROJECT_OPEN = "NO_PROJECT_OPEN";
 
+/** Code d'erreur Confinement (ticket #42) : dossier existant mais hors
+ *  Registre — ni lecture, ni écriture, ni capture. */
+export const OUT_OF_SCOPE = "OUT_OF_SCOPE";
+
 export const EMPTY_CODE = `export default () => (
   <board width="20mm" height="20mm" />
 )
@@ -249,6 +253,39 @@ export function upsertRegistry(reg: Registry, projectPath: string, now = new Dat
   };
   next.projects.sort((a, b) => (b.lastOpened < a.lastOpened ? -1 : 1));
   return next;
+}
+
+/** Confinement (spec #37, ticket #42) : une opération dossier n'est
+ *  autorisée que si le chemin, APRÈS canonicalisation, est un Projet du
+ *  Registre. Toute autre forme (slash final, symlink, `..` résolu) est
+ *  ramenée au canonique avant le test — jamais de comparaison sur le brut.
+ *  `reg` explicite = sans I/O (tests) ; sinon Registre chargé du disque. */
+export function isProjectMember(input: string, reg?: Registry): boolean {
+  let canonical: string;
+  try {
+    canonical = canonicalProjectPath(input);
+  } catch {
+    return false;
+  }
+  const registry = reg ?? loadRegistry();
+  return registry.projects.some((e) => {
+    try {
+      return canonicalProjectPath(e.path) === canonical;
+    } catch {
+      return e.path === canonical;
+    }
+  });
+}
+
+/** Variante qui throw une erreur explicite hors périmètre (jamais de
+ *  `NO_PROJECT_OPEN` silencieux : le dossier existe peut-être, mais il
+ *  n'est pas un Projet du Registre). Retourne le chemin canonique. */
+export function assertProjectMember(input: string, reg?: Registry): string {
+  const canonical = canonicalProjectPath(input);
+  if (isProjectMember(canonical, reg)) return canonical;
+  throw new Error(
+    `hors périmètre (Confinement) : ${canonical} — opération refusée, le dossier n'est pas un Projet du Registre`,
+  );
 }
 
 export interface ProjectListItem extends RegistryEntry {

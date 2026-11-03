@@ -93,6 +93,7 @@ fn get_boot_state(state: tauri::State<'_, Arc<Mutex<BootState>>>) -> BootState {
 /// Avec Projet ouvert : `<projet>/previews/`, sinon cache global.
 /// Jamais d'image inventée côté MCP : sans fichier, `preview_screenshot`
 /// répond « ouvre l'app ».
+/// Jail Confinement (#42) : le Projet ouvert doit être membre du Registre.
 #[tauri::command]
 fn save_screenshot(
     state: tauri::State<'_, Arc<Mutex<BootState>>>,
@@ -104,7 +105,11 @@ fn save_screenshot(
 ) -> Result<preview::SavedPreview, String> {
     let project = state.lock().expect("boot state").project_path.clone();
     let dir = match project {
-        Some(p) => project::project_paths(std::path::Path::new(&p)).previews,
+        Some(p) => {
+            let reg = load_registry();
+            let confined = project::assert_project_member(&p, &reg)?;
+            project::project_paths(&confined).previews
+        }
         None => {
             let cache = boot::base_cache_dir().ok_or("cache_dir indisponible")?;
             preview::preview_dir(&cache)
@@ -114,16 +119,21 @@ fn save_screenshot(
 }
 
 /// Dossier previews partagé (debug UI) : projet ouvert ou cache global.
+/// Jail Confinement (#42) : comme `save_screenshot`.
 #[tauri::command]
 fn get_preview_dir(
     state: tauri::State<'_, Arc<Mutex<BootState>>>,
 ) -> Result<String, String> {
     let project = state.lock().expect("boot state").project_path.clone();
     match project {
-        Some(p) => Ok(project::project_paths(std::path::Path::new(&p))
-            .previews
-            .to_string_lossy()
-            .to_string()),
+        Some(p) => {
+            let reg = load_registry();
+            let confined = project::assert_project_member(&p, &reg)?;
+            Ok(project::project_paths(&confined)
+                .previews
+                .to_string_lossy()
+                .to_string())
+        }
         None => {
             let cache = boot::base_cache_dir().ok_or("cache_dir indisponible")?;
             Ok(preview::preview_dir(&cache).to_string_lossy().to_string())
@@ -278,11 +288,22 @@ fn close_project(state: tauri::State<'_, Arc<Mutex<BootState>>>) -> Result<(), S
 
 #[tauri::command]
 fn forget_project(path: String) -> Result<(), String> {
-    let dir = project::canonical_project_path(&path)?;
-    let mut reg = load_registry();
-    project::forget_registry(&mut reg, &dir.to_string_lossy());
-    save_registry(&reg)?;
+    let Some(cache) = boot::base_cache_dir() else {
+        return Err("cache_dir indisponible".into());
+    };
+    // L'oubli ne touche jamais au disque (pas de corbeille en V1) :
+    // retrait Registre seul (cf. `project::forget_project_in`).
+    project::forget_project_in(&cache, &path)?;
     Ok(())
+}
+
+/// Émet un jeton de suppression à usage unique (garde backend #42).
+/// Le dialogue natif seul ne suffit plus : `delete_project` exige ce jeton.
+/// Hors périmètre → refusé, aucun jeton émis.
+#[tauri::command]
+fn request_delete_token(path: String) -> Result<String, String> {
+    let reg = load_registry();
+    project::request_delete_token(&reg, &path)
 }
 
 /// Relink un Projet orphelin (ticket #38) : remplace l'ancien chemin par le
@@ -332,16 +353,22 @@ fn relink_project(
 fn delete_project(
     state: tauri::State<'_, Arc<Mutex<BootState>>>,
     path: String,
+    token: Option<String>,
 ) -> Result<(), String> {
-    let dir = project::canonical_project_path(&path)?;
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).map_err(|e| format!("suppression dossier : {e}"))?;
-    }
-    let mut reg = load_registry();
-    project::forget_registry(&mut reg, &dir.to_string_lossy());
-    save_registry(&reg)?;
+    // Garde backend (#42) : appartenance + jeton usage unique. Le dialogue
+    // natif (frontend) seul ne suffit plus ; sans jeton, refus explicite.
+    let Some(t) = token else {
+        return Err(
+            "confirmation backend requise (jeton manquant) : demandez request_delete_token avant toute suppression"
+                .into(),
+        );
+    };
+    let Some(cache) = boot::base_cache_dir() else {
+        return Err("cache_dir indisponible".into());
+    };
+    let key = project::delete_project_in(&cache, &path, &t)?;
     let cur = state.lock().expect("boot state").project_path.clone();
-    if cur.as_deref() == Some(dir.to_string_lossy().as_ref()) {
+    if cur.as_deref() == Some(key.as_str()) {
         set_current(&state, None);
     }
     Ok(())
@@ -367,7 +394,9 @@ fn read_project_main(
             .clone()
             .ok_or("aucun projet ouvert")?,
     };
-    let dir = project::canonical_project_path(&target)?;
+    // Jail Confinement (#42) : lecture refusée hors Registre.
+    let reg = load_registry();
+    let dir = project::assert_project_member(&target, &reg)?;
     let main = project::project_paths(&dir).main;
     let code = std::fs::read_to_string(&main).map_err(|e| format!("lecture main.tsx : {e}"))?;
     Ok(ProjectMain {
@@ -444,6 +473,7 @@ pub fn run() {
             close_project,
             forget_project,
             relink_project,
+            request_delete_token,
             delete_project,
             read_project_main
         ])
