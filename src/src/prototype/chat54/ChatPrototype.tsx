@@ -156,13 +156,14 @@ function Thread({ chat, compact }: { chat: Chat; compact?: boolean }) {
   );
 }
 
-function Composer({ chat }: { chat: Chat }) {
+function Composer({ chat, modelPicker }: { chat: Chat; modelPicker?: React.ReactNode }) {
   const [v, setV] = useState("");
   return (
     <form
       onSubmit={(e) => { e.preventDefault(); chat.send(v); setV(""); }}
-      style={{ display: "flex", gap: 6, padding: 8, borderTop: "1px solid #dadce0" }}
+      style={{ display: "flex", gap: 6, padding: 8, borderTop: "1px solid #dadce0", alignItems: "center" }}
     >
+      {modelPicker}
       <input
         value={v}
         onChange={(e) => setV(e.target.value)}
@@ -240,20 +241,21 @@ function VariantB({ chat }: { chat: Chat }) {
       <div style={BANNER}>PROTOTYPE JETABLE #54 — variante B (Drawer) — mock, aucune clé {!open && <button onClick={() => setOpen(true)} style={{ marginLeft: 8 }}>Ouvrir l'agent</button>}</div>
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
         <div style={{ ...PANEL, flex: 1, margin: 8 }}>
-          <div style={{ padding: 8, borderBottom: "1px solid #eee", display: "flex", gap: 8 }}>
-            <span>Schéma · PCB · 3D (mock, pleine largeur)</span>
-            <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}><ModelPicker chat={chat} /><ModeToggle chat={chat} /></span>
+          <div style={{ padding: 8, borderBottom: "1px solid #eee" }}>
+            Schéma · PCB · 3D (mock, pleine largeur)
           </div>
           <FakePreview label="B" />
           <ContextBar chat={chat} />
         </div>
         {open && (
           <div style={{ ...PANEL, width: 380, margin: "8px 8px 8px 0" }}>
-            <div style={{ padding: 8, borderBottom: "1px solid #eee", fontWeight: 700 }}>
-              Agent IA <button onClick={() => setOpen(false)} style={{ float: "right" }} aria-label="Replier">→</button>
+            <div style={{ padding: 8, borderBottom: "1px solid #eee", fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
+              Agent IA
+              <ModeToggle chat={chat} />
+              <button onClick={() => setOpen(false)} style={{ marginLeft: "auto" }} aria-label="Replier">→</button>
             </div>
             <Thread chat={chat} compact />
-            <Composer chat={chat} />
+            <Composer chat={chat} modelPicker={<ModelPicker chat={chat} />} />
           </div>
         )}
       </div>
