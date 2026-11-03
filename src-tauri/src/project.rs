@@ -170,13 +170,37 @@ pub fn parse_circuit_text(text: &str) -> Result<Vec<serde_json::Value>, String> 
 }
 
 /// Relit les éléments du `circuit.json` d'un Projet. Erreur si absent/corrompu.
-pub fn read_circuit_file(dir: &Path) -> Result<Vec<serde_json::Value>, String> {
-    let text = std::fs::read_to_string(dir.join(CIRCUIT_FILE))
+pub fn read_circuit_file(dir: &Path) -> Result<Vec<serde_json::Value>, String> {    let text = std::fs::read_to_string(dir.join(CIRCUIT_FILE))
         .map_err(|_| format!("circuit.json absent ({}) : rouvrez le Projet", dir.display()))?;
     if text.trim().is_empty() {
         return Err(format!("circuit.json corrompu ({}) : fichier vide", dir.display()));
     }
     parse_circuit_text(&text)
+}
+
+/// Contenu `main.tsx` + hash (contrat relecture conditionnelle, ticket #43).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MainFileData {
+    /// Chemin absolu du `main.tsx` lu.
+    pub path: String,
+    /// Code disque (source unique de vérité).
+    pub code: String,
+    /// Hash sha256 hex du contenu (cf. `watch::hash_main_content`).
+    pub hash: String,
+}
+
+/// Relit `main.tsx` + hash depuis le disque. Erreur explicite si illisible —
+/// jamais de défaut silencieux (le bandeau + toast la remontent).
+pub fn read_main_file(dir: &Path) -> Result<MainFileData, String> {
+    let main = dir.join(MAIN_FILE);
+    let code =
+        std::fs::read_to_string(&main).map_err(|e| format!("lecture main.tsx : {e}"))?;
+    let hash = crate::watch::hash_main_content(code.as_bytes());
+    Ok(MainFileData {
+        path: main.to_string_lossy().into_owned(),
+        code,
+        hash,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -689,5 +713,30 @@ mod tests {
         assert_eq!(parent_of_project_path("/a/parent-a/doublon"), "/a/parent-a");
         assert_eq!(parent_of_project_path("/doublon"), "/");
         assert_eq!(parent_of_project_path("/"), "");
+    }
+
+    // --- Ticket #43 : lecture main.tsx + hash (relecture conditionnelle) ----
+
+    #[test]
+    fn lit_main_avec_hash_coherent() {
+        let base = std::env::temp_dir().join(format!("nia-readmain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        ensure_project_layout(&base, "vide").expect("layout");
+        std::fs::write(base.join("main.tsx"), "code-marqueur").unwrap();
+        let got = read_main_file(&base).expect("lit main");
+        assert_eq!(got.code, "code-marqueur");
+        assert_eq!(got.path, base.join("main.tsx").to_string_lossy());
+        assert_eq!(got.hash, crate::watch::hash_main_content(b"code-marqueur"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn lit_main_absent_erreur_explicite() {
+        let base = std::env::temp_dir().join(format!("nia-readmain-ko-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let err = read_main_file(&base).expect_err("sans main.tsx → erreur");
+        assert!(err.contains("lecture main.tsx"), "erreur explicite : {err}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

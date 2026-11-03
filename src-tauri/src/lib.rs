@@ -1,13 +1,16 @@
 mod boot;
 mod preview;
 mod project;
+mod watch;
 
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex, OnceLock,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
+use tauri::Emitter;
 use tauri::Manager;
 
 /// Sidecar `pcb-mcp` (#10) : enfant détaché, tué à la fermeture de l'app.
@@ -28,6 +31,54 @@ fn kill_sidecar() {
         let _ = child.kill();
         let _ = child.wait();
     }
+}
+
+// --- Watcher main.tsx (ticket #43) ------------------------------------------
+// Un seul watch actif : ré-armé à chaque ouverture/création, retiré à la
+// fermeture. Le garde `watch::ProjectMainWatch` vit dans un thread dédié
+// (drop = arrêt) ; seul un drapeau d'arrêt est partagé ici.
+struct ActiveWatch {
+    stop: Arc<AtomicBool>,
+}
+
+static WATCHER: OnceLock<Mutex<Option<ActiveWatch>>> = OnceLock::new();
+
+fn watcher_slot() -> &'static Mutex<Option<ActiveWatch>> {
+    WATCHER.get_or_init(|| Mutex::new(None))
+}
+
+/// (Ré-)arme le watch sur le Projet ouvert, ou l'arrête si Accueil.
+/// L'ancien watch est stoppé avant d'armer le nouveau (jamais deux watches).
+fn rewatch_main(app: &tauri::AppHandle, project: Option<&str>) {
+    if let Some(prev) = watcher_slot().lock().expect("watcher").take() {
+        prev.stop.store(true, Ordering::SeqCst);
+    }
+    let Some(dir) = project else { return };
+    let dir = PathBuf::from(dir);
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        match watch::watch_project_main(&dir, watch::WATCH_DEBOUNCE, move |payload| {
+            let _ = handle.emit(watch::MAIN_CHANGED_EVENT, payload);
+        }) {
+            Ok(_watch) => {
+                // Garde vivant tant que le Projet est ouvert ; stop → drop.
+                while !flag.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+            Err(e) => eprintln!("[watch] {e}"),
+        }
+    });
+    *watcher_slot().lock().expect("watcher") = Some(ActiveWatch { stop });
+}
+
+/// Ré-arme le watcher d'après le Projet courant (à appeler après chaque
+/// changement de `BootState.project_path`).
+fn rewatch_current(app: &tauri::AppHandle, state: &tauri::State<'_, Arc<Mutex<BootState>>>) {
+    let project = state.lock().expect("boot state").project_path.clone();
+    rewatch_main(app, project.as_deref());
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -216,6 +267,7 @@ fn list_projects() -> Result<ProjectList, String> {
 
 #[tauri::command]
 fn current_project(
+    app: tauri::AppHandle,
     state: tauri::State<'_, Arc<Mutex<BootState>>>,
 ) -> Result<Option<String>, String> {
     let cur = state.lock().expect("boot state").project_path.clone();
@@ -223,6 +275,7 @@ fn current_project(
         // Dossier supprimé (orphelin) → Accueil : réinitialisé, pas fantôme.
         Some(p) if !std::path::Path::new(&p).exists() => {
             set_current(&state, None);
+            rewatch_main(&app, None);
             Ok(None)
         }
         other => Ok(other),
@@ -231,6 +284,7 @@ fn current_project(
 
 #[tauri::command]
 fn create_project(
+    app: tauri::AppHandle,
     state: tauri::State<'_, Arc<Mutex<BootState>>>,
     path: String,
     template: Option<String>,
@@ -243,11 +297,13 @@ fn create_project(
     save_registry(&reg)?;
     let s = dir.to_string_lossy().to_string();
     set_current(&state, Some(s.clone()));
+    rewatch_current(&app, &state);
     Ok(s)
 }
 
 #[tauri::command]
 fn open_project(
+    app: tauri::AppHandle,
     state: tauri::State<'_, Arc<Mutex<BootState>>>,
     path: String,
 ) -> Result<String, String> {
@@ -267,12 +323,17 @@ fn open_project(
     save_registry(&reg)?;
     let s = dir.to_string_lossy().to_string();
     set_current(&state, Some(s.clone()));
+    rewatch_current(&app, &state);
     Ok(s)
 }
 
 #[tauri::command]
-fn close_project(state: tauri::State<'_, Arc<Mutex<BootState>>>) -> Result<(), String> {
+fn close_project(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<Mutex<BootState>>>,
+) -> Result<(), String> {
     set_current(&state, None);
+    rewatch_current(&app, &state);
     Ok(())
 }
 
@@ -290,6 +351,7 @@ fn forget_project(path: String) -> Result<(), String> {
 /// l'ordre et `lastOpened`. Le Projet courant suit s'il était l'orphelin.
 #[tauri::command]
 fn relink_project(
+    app: tauri::AppHandle,
     state: tauri::State<'_, Arc<Mutex<BootState>>>,
     old_path: String,
     new_path: String,
@@ -325,11 +387,13 @@ fn relink_project(
     if cur.as_deref() == Some(old_s.as_str()) {
         set_current(&state, Some(new_s.clone()));
     }
+    rewatch_current(&app, &state);
     Ok(new_s)
 }
 
 #[tauri::command]
 fn delete_project(
+    app: tauri::AppHandle,
     state: tauri::State<'_, Arc<Mutex<BootState>>>,
     path: String,
 ) -> Result<(), String> {
@@ -344,6 +408,7 @@ fn delete_project(
     if cur.as_deref() == Some(dir.to_string_lossy().as_ref()) {
         set_current(&state, None);
     }
+    rewatch_current(&app, &state);
     Ok(())
 }
 
@@ -351,6 +416,7 @@ fn delete_project(
 struct ProjectMain {
     path: String,
     code: String,
+    hash: String,
 }
 
 #[tauri::command]
@@ -368,11 +434,11 @@ fn read_project_main(
             .ok_or("aucun projet ouvert")?,
     };
     let dir = project::canonical_project_path(&target)?;
-    let main = project::project_paths(&dir).main;
-    let code = std::fs::read_to_string(&main).map_err(|e| format!("lecture main.tsx : {e}"))?;
+    let data = project::read_main_file(&dir)?;
     Ok(ProjectMain {
-        path: dir.to_string_lossy().to_string(),
-        code,
+        path: data.path,
+        code: data.code,
+        hash: data.hash,
     })
 }
 
@@ -422,6 +488,9 @@ pub fn run() {
                     .unwrap_or_default();
                 match boot_or_attach(&handle) {
                     Ok(info) => {
+                        // Watcher temps réel (ticket #43) : armé sur le Projet
+                        // rouvert au boot, retiré si Accueil.
+                        rewatch_main(&handle, info.project_path.as_deref());
                         *state.lock().expect("boot state") = info;
                     }
                     Err(e) => {

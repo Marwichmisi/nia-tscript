@@ -441,3 +441,62 @@ export function persistProjectFiles(projectPath: string, code: string, circuitJs
   atomicWriteFileSync(path.join(dir, MAIN_FILE), code);
   atomicWriteFileSync(path.join(dir, CIRCUIT_FILE), serializeCircuitFile(circuitJson));
 }
+
+// --- Resync temps réel (ticket #43) ------------------------------------------
+// Couture watcher → événement → relecture : le disque est la source unique de
+// vérité, le hash décide seul de la relecture. Même règle de hash que le
+// backend Rust (`hash_main_content` dans `src-tauri/src/watch.rs`).
+
+/** Hash stable du contenu `main.tsx` (sha256 hex, 64 car.). */
+export function hashMainCode(code: string): string {
+  return crypto.createHash("sha256").update(code, "utf8").digest("hex");
+}
+
+/** Payload d'événement `project-main-changed` : ce qui a changé + son hash.
+ *  `path` = le `main.tsx` surveillé (pas le dossier), `hash` = son contenu. */
+export interface MainChangedEvent {
+  path: string;
+  hash: string;
+}
+
+/** Construit le payload depuis le dossier Projet canonique + code disque. */
+export function buildMainChangedEvent(projectPath: string, code: string): MainChangedEvent {
+  const dir = canonicalProjectPath(projectPath);
+  return { path: path.join(dir, MAIN_FILE), hash: hashMainCode(code) };
+}
+
+export interface MainWithHash {
+  path: string;
+  code: string;
+  hash: string;
+}
+
+/** Relit `main.tsx` depuis le disque + hash. Throw si illisible (jamais de
+ *  défaut silencieux : l'appelant remonte l'erreur, cf. bandeau + toast). */
+export function readMainWithHash(projectPath: string): MainWithHash {
+  const dir = canonicalProjectPath(projectPath);
+  const main = path.join(dir, MAIN_FILE);
+  let code: string;
+  try {
+    code = fs.readFileSync(main, "utf8");
+  } catch (e) {
+    throw new Error(`lecture main.tsx : ${e instanceof Error ? e.message : String(e)}`);
+  }
+  return { path: main, code, hash: hashMainCode(code) };
+}
+
+export interface RereadResult extends MainWithHash {
+  /** Vrai si le disque diffère du hash connu → relecture nécessaire. */
+  changed: boolean;
+}
+
+/** Relecture conditionnelle : compare le hash disque au hash connu
+ *  (`null` = première lecture, toujours `changed:true`). Ne touche jamais à
+ *  la mémoire — l'appelant décide (`setCode` si `changed`). */
+export function rereadMainIfChanged(
+  projectPath: string,
+  knownHash: string | null,
+): RereadResult {
+  const got = readMainWithHash(projectPath);
+  return { ...got, changed: knownHash === null || got.hash !== knownHash };
+}
