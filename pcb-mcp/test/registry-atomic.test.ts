@@ -146,3 +146,38 @@ describe("écriture atomique", () => {
     expect(lockfilePath()).toBe(lockFile);
   });
 });
+
+describe("revue #37 item 7 — écrivains sidecar via helpers atomiques seuls", () => {
+  const srcDir = path.resolve(import.meta.dir, "..", "src");
+  const readSrc = (f: string) => fs.readFileSync(path.join(srcDir, f), "utf8");
+
+  test("écritures directes limitées à logs/captures/exports + tmp atomique", () => {
+    const writers = fs
+      .readdirSync(srcDir)
+      .filter((f) => f.endsWith(".ts"))
+      .filter((f) => /writeFileSync|appendFileSync/.test(readSrc(f)))
+      .sort();
+    expect(writers).toEqual(["log.ts", "mcp.ts", "preview.ts", "project.ts"]);
+    // project.ts : le seul write direct est le tmp de l'helper atomique.
+    const project = readSrc("project.ts");
+    expect(project.match(/writeFileSync/g)?.length).toBe(1);
+    expect(project.indexOf("export function atomicWriteFileSync")).toBeLessThan(
+      project.indexOf("fs.writeFileSync(fd, content)"),
+    );
+  });
+
+  test("Registre/lockfile/Projet persistés uniquement via helpers atomiques", () => {
+    const project = readSrc("project.ts");
+    for (const fn of ["saveRegistry", "writeLockProjectPath", "persistProjectFiles", "ensureProjectLayout"]) {
+      const at = project.indexOf(`export function ${fn}`);
+      expect(at, fn).toBeGreaterThanOrEqual(0);
+      const next = project.indexOf("export function", at + 1);
+      const body = project.slice(at, next === -1 ? undefined : next);
+      expect(body, fn).toContain("atomicWriteFileSync");
+    }
+    // Chemins résolus uniquement dans project.ts (pas de contournement).
+    for (const f of ["mcp.ts", "state.ts", "server.ts", "http.ts", "queue.ts", "log.ts"]) {
+      expect(readSrc(f), f).not.toMatch(/registryPath\(\)|lockfilePath\(\)/);
+    }
+  });
+});
