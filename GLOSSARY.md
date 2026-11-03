@@ -55,3 +55,15 @@ _Avoid_: screenshot custom, image labellisée, snapshot nommé
 **Confinement**:
 La règle backend qui n'autorise les opérations dossier que sur un Projet du Registre, après `canonicalize`.
 _Avoid_: jail, sandbox, bac à sable
+
+**Agent intégré**:
+Le chat IA directement dans l'application, second consommateur des mêmes outils que le pilotage MCP externe.
+_Avoid_: chatbot, assistant externe, pilote MCP
+
+**Conversation**:
+L'historique des échanges avec l'Agent intégré, rattaché à un Projet ouvert, avec compaction au seuil et possibilité de repartir à neuf.
+_Avoid_: session, thread, chat global
+
+**Mode d'approbation**:
+Le réglage qui décide quand l'Agent intégré doit demander avant de modifier : Manuel (1 approval par Lot) ou Auto modifications (suppression du Projet toujours manuelle).
+_Avoid_: auto-approve, autopilote, validation auto
