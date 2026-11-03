@@ -97,4 +97,34 @@ describe("#39 — diagnostics embarqués du circuit-json", () => {
     expect(diags.filter((d) => d.severity === "error").length).toBe(2);
     expect(diags.filter((d) => d.severity === "warning").length).toBe(1);
   });
+
+  test("sous-chaîne error sans suffixe _error → aucun diagnostic (faux positif #review-1)", () => {
+    const diags = extractEmbeddedDiagnostics([
+      { type: "error_report" },
+      { type: "pcb_errorenous_flag" },
+      { type: "myerrorhandler" },
+    ]);
+    expect(diags).toEqual([]);
+  });
+
+  test("sous-chaîne warning sans suffixe _warning → aucun diagnostic (faux positif #review-1)", () => {
+    const diags = extractEmbeddedDiagnostics([
+      { type: "warning_track" },
+      { type: "warnings_enabled" },
+      { type: "mywarninghandler" },
+    ]);
+    expect(diags).toEqual([]);
+  });
+
+  test("cas réels validés : suffixe _error/_warning + casse mixte + type nu", () => {
+    const diags = extractEmbeddedDiagnostics([
+      { type: "source_invalid_component_property_error", message: "bad prop" },
+      { type: "pcb_footprint_overlap_error", message: "overlap" },
+      { type: "PCB_ERROR", message: "majuscules" },
+      { type: "error", message: "nu" },
+      { type: "WARNING", message: "nu warning" },
+    ]);
+    expect(diags.filter((d) => d.severity === "error").length).toBe(4);
+    expect(diags.filter((d) => d.severity === "warning").length).toBe(1);
+  });
 });

@@ -59,9 +59,11 @@ function firstNonEmptyString(el: Record<string, unknown>, keys: string[]): strin
 }
 
 /**
- * Diagnostics embarqués du circuit-json (#39).
+ * Diagnostics embarqués du circuit-json (#39, revue #37 item 1).
  * Signaux reconnus (indépendants de la version core exacte) :
- * - `type` contenant "error"/"warning" (insensible à la casse) ;
+ * - `type` exactement "error"/"warning" ou à suffixe "_error"/"_warning"
+ *   (insensible à la casse ; la sous-chaîne nue — ex "error_report" —
+ *   ne compte PAS, sinon faux positifs qui bloquent batch/export) ;
  * - champ explicite `error_message`/`error` (resp. `warning_message`/`warning`).
  * Priorité du libellé : champ explicite > `message` > extrait JSON.
  * Source "circuit-json" (distincte de "compile" et des domaines checks).
@@ -72,16 +74,18 @@ export function extractEmbeddedDiagnostics(circuitJson: unknown[]): Diagnostic[]
     const el = (raw ?? {}) as Record<string, unknown>;
     const type = typeof el["type"] === "string" ? (el["type"] as string) : "";
     const lowered = type.toLowerCase();
+    const isErrorType = /(^|_)error$/.test(lowered);
+    const isWarningType = /(^|_)warning$/.test(lowered);
     const errorField = firstNonEmptyString(el, ["error_message", "error"]);
     const warningField = firstNonEmptyString(el, ["warning_message", "warning"]);
     const messageField = firstNonEmptyString(el, ["message"]);
-    if (lowered.includes("error") || errorField !== null) {
+    if (isErrorType || errorField !== null) {
       out.push({
         severity: "error",
         message: errorField ?? messageField ?? JSON.stringify(raw).slice(0, 300),
         source: "circuit-json",
       });
-    } else if (lowered.includes("warning") || warningField !== null) {
+    } else if (isWarningType || warningField !== null) {
       out.push({
         severity: "warning",
         message: warningField ?? messageField ?? JSON.stringify(raw).slice(0, 300),
