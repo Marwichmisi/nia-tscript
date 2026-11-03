@@ -85,7 +85,10 @@ function validateFootprint(s: string): string | null {
   const t = s.trim();
   if (!t) return null;
   try {
-    fp.string(t);
+    // fp.string ne fait que parser : la compilation réelle (qui rejette les
+    // DSL farfelus) a lieu dans soup(). Valider = compiler.
+    const builder = fp.string(t) as { soup: () => unknown[] };
+    builder.soup();
     return t;
   } catch {
     return null;
@@ -228,6 +231,13 @@ export function scorePart(
   return score;
 }
 
+/** Détecte un timeout/abandon de fetch (AbortError, TimeoutError, message). */
+function isTimeoutError(e: unknown): boolean {
+  if (e instanceof DOMException && e.name === "AbortError") return true;
+  const text = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+  return /timeout|timed out|abort/i.test(text);
+}
+
 /** Recherche JLCPCB-first (même source que `tsci search --jlcpcb`). */
 export async function searchParts(
   query: string,
@@ -252,11 +262,59 @@ export async function searchParts(
   let components: JlcComponent[];
   try {
     const res = await doFetch(`${JLCSEARCH_BASE}/api/search?q=${encodeURIComponent(q)}`);
-    if (!res.ok) throw new Error(`jlcsearch HTTP ${res.status}`);
-    const body = (await res.json()) as { components?: JlcComponent[] };
-    components = Array.isArray(body.components) ? body.components : [];
+    if (res.status === 429) {
+      return {
+        ok: false,
+        query: q,
+        tsciSearch,
+        message:
+          `jlcsearch saturé (HTTP 429 — quota/rate-limit) pour "${q}" : ` +
+          `patientez quelques secondes puis réessayez, ou ${tsciSearch}`,
+        banner: null,
+      };
+    }
+    if (!res.ok) {
+      if (res.status >= 500 && res.status <= 599) {
+        return {
+          ok: false,
+          query: q,
+          tsciSearch,
+          message:
+            `jlcsearch indisponible (HTTP ${res.status} — erreur serveur) pour "${q}" : ` +
+            `réessayez plus tard, ou ${tsciSearch}`,
+          banner: null,
+        };
+      }
+      throw new Error(`jlcsearch HTTP ${res.status}`);
+    }
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      return {
+        ok: false,
+        query: q,
+        tsciSearch,
+        message: `réponse jlcsearch illisible (JSON invalide) pour "${q}" : réessayez, ou ${tsciSearch}`,
+        banner: null,
+      };
+    }
+    const parsed = body as { components?: JlcComponent[] };
+    components = Array.isArray(parsed.components) ? parsed.components : [];
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
+    if (/^jlcsearch HTTP/.test(message)) {
+      return { ok: false, query: q, tsciSearch, message: `recherche JLCPCB impossible : ${message.slice(0, 200)} — réessayez en ligne ou via ${tsciSearch}`, banner: null };
+    }
+    if (isTimeoutError(e)) {
+      return {
+        ok: false,
+        query: q,
+        tsciSearch,
+        message: `recherche JLCPCB interrompue (timeout) pour "${q}" : réseau trop lent ou jointure coupée — réessayez, ou ${tsciSearch}`,
+        banner: null,
+      };
+    }
     return { ok: false, query: q, tsciSearch, message: `recherche JLCPCB impossible : ${message.slice(0, 200)} — réessayez en ligne ou via ${tsciSearch}`, banner: null };
   }
   // Pertinence : l'index générique rend des résultats flous (mauvais package

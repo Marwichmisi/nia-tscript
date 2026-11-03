@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { emptyStats } from "./board.js";
+import { boardExpectsRouting, boardRoutingDisabled, emptyStats, isBoardRouted, ROUTE_EFFORTS } from "./board.js";
 import { runDomainChecks, runPlacementGate, type CheckDomain } from "./checks.js";
 import { compileTsx } from "./compile.js";
 import { applyBatch, BATCH_MAX_OPS, type BatchOp } from "./batch.js";
@@ -322,6 +322,13 @@ const BatchOpSchema = z.union([
     pin: z.string().min(1).describe("reassign_net : pin visée (ex pin1)"),
     net: z.string().min(1).describe("reassign_net : net cible (ex GND ou net.GND)"),
   }),
+  z.object({
+    kind: z.literal("route"),
+    effort: z
+      .enum(ROUTE_EFFORTS)
+      .optional()
+      .describe("route : effort de l'autorouteur local auto_local (défaut 1x)"),
+  }),
 ]);
 
 const BatchExecuteInput = z.object({
@@ -329,7 +336,7 @@ const BatchExecuteInput = z.object({
   operations: z
     .array(BatchOpSchema)
     .describe(
-      `Lot atomique patch+live (1..${BATCH_MAX_OPS}) : une seule approbation couvre l'itération complète, rollback si un op échoue`,
+      `Lot atomique patch+live+route (1..${BATCH_MAX_OPS}) : une seule approbation couvre l'itération complète, rollback si un op échoue`,
     ),
   disableCdnLoading: z
     .boolean()
@@ -801,7 +808,10 @@ export function buildFactory() {
         const asked: CheckDomain = domain ?? "all";
         const code = getCode();
         const compiled = await compileTsx(code, { disableCdnLoading });
-        if (compiled.errors !== 0) {
+        // Runner en échec (exception) → pas de circuit-json exploitable.
+        // Les erreurs embarquées (soft) n'empêchent pas le gate (#39 : gate
+        // placement inchangé, évalué sur le circuit-json réel).
+        if (compiled.mode === "echec") {
           const output = {
             sessionId,
             domain: asked,
@@ -846,7 +856,12 @@ export function buildFactory() {
             structuredContent: output,
           };
         }
-        const violations = await runDomainChecks(compiled.circuitJson, asked);
+        let violations = await runDomainChecks(compiled.circuitJson, asked);
+        // Gate dur (#39) : domain=all ne fournit plus de routage quand le
+        // routage est interdit (placement non vert). Gate placement inchangé.
+        if (asked === "all" && !gate.routingAllowed) {
+          violations = violations.filter((v) => v.domain !== "routing");
+        }
         const counts = {
           netlist: violations.filter((v) => v.domain === "netlist").length,
           placement: violations.filter((v) => v.domain === "placement").length,
@@ -868,8 +883,9 @@ export function buildFactory() {
           blockReason: gate.blockReason,
           counts,
           violations,
-          errors: 0,
-          warnings: 0,
+          // Compteurs réels (#39) : erreurs/warnings embarqués du circuit-json.
+          errors: compiled.errors,
+          warnings: compiled.warnings,
         };
         return {
           content: [{ type: "text", text: JSON.stringify(output) }],
@@ -1264,7 +1280,7 @@ export function buildFactory() {
       {
         title: "Lot atomique + une approbation",
         description:
-          "Applique un lot mixte patch+live en une seule approbation : toutes les ops en mémoire puis une seule compile. Échec (op invalide ou compile en erreur) → rollback complet fichier+live, état inchangé. Une itération = un seul tools/call.",
+          "Applique un lot mixte patch+live+route en une seule approbation : toutes les ops en mémoire puis une seule compile. Op `route` : épingle l'autorouteur local (effort configurable) et exige le gate placement + routage effectif. Échec (op invalide, compile en erreur ou gate route rouge) → rollback complet fichier+live, état inchangé. Une itération = un seul tools/call.",
         inputSchema: BatchExecuteInput,
         outputSchema: BatchExecuteOutput,
         annotations: {
@@ -1395,6 +1411,49 @@ export function buildFactory() {
               content: [{ type: "text", text: JSON.stringify(output) }],
               structuredContent: output,
             };
+          }
+          // Gate route (#44) : si le lot contient une op `route`, la compile
+          // verte ne suffit pas — le placement doit être vert (sinon le
+          // moteur ignore l'autoroutage) et le circuit-json doit être
+          // effectivement routé. Sinon rollback, état inchangé.
+          if (ops.some((o) => o.kind === "route")) {
+            const gate = await runPlacementGate(compiled.circuitJson, batched.code);
+            const blockReason = !gate.routingAllowed
+              ? (gate.blockReason ?? "placement non vert")
+              : !isBoardRouted(compiled.circuitJson)
+                ? "board non routé : aucune pcb_trace avec route dans le circuit-json — vérifiez le placement puis relancez"
+                : null;
+            if (blockReason) {
+              restoreStore(snap);
+              const ready = getBoardState(sessionId).ready;
+              const output = {
+                sessionId,
+                applied: false as const,
+                ready,
+                failedOpIndex: null as number | null,
+                rolledBack: true,
+                stats: emptyStats(),
+                diagnostics: [
+                  { severity: "error", message: `routing refusé : ${blockReason}`, source: "batch_execute" },
+                ],
+                mode: "echec",
+                banner: compiled.banner,
+                errors: 1,
+                warnings: compiled.warnings,
+                circuitJsonLength: 0,
+                circuitJson: [] as unknown[],
+                code: snap.code,
+              };
+              appendLog(
+                "error",
+                "compile",
+                `batch_execute rollback : routing refusé — ${blockReason}`,
+              );
+              return {
+                content: [{ type: "text", text: JSON.stringify(output) }],
+                structuredContent: output,
+              };
+            }
           }
           setLastCompile({ status: "ok", errors: 0, warnings: compiled.warnings });
           appendLog(
@@ -1572,7 +1631,8 @@ export function buildFactory() {
         const sessionId = session_id ?? "default";
         const code = getCode();
         const compiled = await compileTsx(code, { disableCdnLoading });
-        if (compiled.errors !== 0) {
+        // Runner en échec (exception) → aucun circuit-json : pas de gate.
+        if (compiled.mode === "echec") {
           appendLog(
             "error",
             "export",
@@ -1596,6 +1656,139 @@ export function buildFactory() {
             artifacts: [],
             exportDir: "",
             message: `compile en erreur : ${compiled.diagnostics[0]?.message ?? "inconnu"} — corrigez via code_patch avant tout export`,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        }
+        // Gate board routé (#44) : le routage déclaré interdit
+        // (`routingDisabled`) est refusé avec un message explicite avant le
+        // gate DRC (dont le décompte générique masquerait la cause).
+        // L'export sort d'un board routé par l'autorouteur local.
+        if (boardRoutingDisabled(code)) {
+          const reason =
+            "routingDisabled déclaré sur <board> — retirez-le via code_patch et routez (batch_execute route) avant tout export";
+          appendLog("error", "export", `fab_export refusé : board non routé — ${reason}`);
+          const output = {
+            sessionId,
+            ready: false as const,
+            mode: "refuse",
+            banner: compiled.banner,
+            errors: 1,
+            warnings: 0,
+            counts: { gerberFiles: 0, bomRows: 0, pnpRows: 0 },
+            gerberNames: [],
+            gerberPreview: "",
+            bomCsv: "",
+            pnpCsv: "",
+            kicad: { pcbBytes: 0, schBytes: 0, proBytes: 0, pcbPreview: "" },
+            kicadZip: { bytes: 0, previewUrl: "" },
+            fabZip: { bytes: 0, previewUrl: "" },
+            artifacts: [],
+            exportDir: "",
+            message: `board non routé : ${reason}`,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        }
+        // Gate DRC obligatoire avant export (#39) : placement vert exigé et
+        // zéro violation tous domaines (routing exclu si interdit, comme run_checks).
+        const gate = await runPlacementGate(compiled.circuitJson, code);
+        const allViolations = await runDomainChecks(compiled.circuitJson, "all");
+        const drcViolations = gate.routingAllowed
+          ? allViolations
+          : allViolations.filter((v) => v.domain !== "routing");
+        if (!gate.placementGreen || drcViolations.length > 0) {
+          const reason =
+            gate.blockReason ?? `${drcViolations.length} violation(s) DRC à corriger`;
+          setDrcViolations(drcViolations.length);
+          appendLog("error", "export", `fab_export refusé : DRC rouge — ${reason}`);
+          const output = {
+            sessionId,
+            ready: false as const,
+            mode: "refuse",
+            banner: compiled.banner,
+            errors: 1,
+            warnings: 0,
+            counts: { gerberFiles: 0, bomRows: 0, pnpRows: 0 },
+            gerberNames: [],
+            gerberPreview: "",
+            bomCsv: "",
+            pnpCsv: "",
+            kicad: { pcbBytes: 0, schBytes: 0, proBytes: 0, pcbPreview: "" },
+            kicadZip: { bytes: 0, previewUrl: "" },
+            fabZip: { bytes: 0, previewUrl: "" },
+            artifacts: [],
+            exportDir: "",
+            message: `DRC rouge : ${reason} — corrigez via code_patch/run_checks avant tout export`,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        }
+        setDrcViolations(0);
+        // Preuve de routage effectif (#44, résiduel après gate DRC) : des
+        // `<trace>` déclarées mais aucune `pcb_trace` routée (autoroutage
+        // ignoré) → export refusé, jamais de gerbers sans cuivre.
+        if (boardExpectsRouting(code) && !isBoardRouted(compiled.circuitJson)) {
+          const reason =
+            "aucune trace routée dans le circuit-json — routez via batch_execute (op route) avant tout export";
+          appendLog("error", "export", `fab_export refusé : board non routé — ${reason}`);
+          const output = {
+            sessionId,
+            ready: false as const,
+            mode: "refuse",
+            banner: compiled.banner,
+            errors: 1,
+            warnings: 0,
+            counts: { gerberFiles: 0, bomRows: 0, pnpRows: 0 },
+            gerberNames: [],
+            gerberPreview: "",
+            bomCsv: "",
+            pnpCsv: "",
+            kicad: { pcbBytes: 0, schBytes: 0, proBytes: 0, pcbPreview: "" },
+            kicadZip: { bytes: 0, previewUrl: "" },
+            fabZip: { bytes: 0, previewUrl: "" },
+            artifacts: [],
+            exportDir: "",
+            message: `board non routé : ${reason}`,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        }
+        // Erreurs embarquées résiduelles (gate vert, checks verts, mais
+        // circuit-json en erreur : ex empreinte invalide) → export refusé
+        // comme une compile en erreur, jamais de gerbers inventés.
+        if (compiled.errors > 0) {
+          appendLog(
+            "error",
+            "export",
+            `fab_export impossible : compile en erreur — ${compiled.diagnostics.find((d) => d.severity === "error")?.message ?? "inconnu"}`,
+          );
+          const output = {
+            sessionId,
+            ready: false as const,
+            mode: "echec",
+            banner: compiled.banner,
+            errors: compiled.errors,
+            warnings: compiled.warnings,
+            counts: { gerberFiles: 0, bomRows: 0, pnpRows: 0 },
+            gerberNames: [],
+            gerberPreview: "",
+            bomCsv: "",
+            pnpCsv: "",
+            kicad: { pcbBytes: 0, schBytes: 0, proBytes: 0, pcbPreview: "" },
+            kicadZip: { bytes: 0, previewUrl: "" },
+            fabZip: { bytes: 0, previewUrl: "" },
+            artifacts: [],
+            exportDir: "",
+            message: `compile en erreur : ${compiled.diagnostics.find((d) => d.severity === "error")?.message ?? "inconnu"} — corrigez via code_patch avant tout export`,
           };
           return {
             content: [{ type: "text", text: JSON.stringify(output) }],

@@ -22,6 +22,8 @@ let baseUrl = "";
 let tmpRoot = "";
 let lockFile = "";
 let regFile = "";
+let savedLock: string | undefined;
+let savedProjectsFile: string | undefined;
 
 function freePort(): Promise<number> {
   return new Promise((resolve) => {
@@ -77,6 +79,8 @@ beforeAll(async () => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "nia-server-mcp-"));
   lockFile = path.join(tmpRoot, "mcp.json");
   regFile = path.join(tmpRoot, "projects.json");
+  savedLock = process.env.NIATSCIRCUIT_MCP_LOCK;
+  savedProjectsFile = process.env.NIATSCIRCUIT_PROJECTS_FILE;
   process.env.NIATSCIRCUIT_MCP_LOCK = lockFile;
   process.env.NIATSCIRCUIT_PROJECTS_FILE = regFile;
   resetStoreForTests();
@@ -89,8 +93,10 @@ beforeAll(async () => {
 
 afterAll(() => {
   server.close();
-  delete process.env.NIATSCIRCUIT_MCP_LOCK;
-  delete process.env.NIATSCIRCUIT_PROJECTS_FILE;
+  if (savedLock === undefined) delete process.env.NIATSCIRCUIT_MCP_LOCK;
+  else process.env.NIATSCIRCUIT_MCP_LOCK = savedLock;
+  if (savedProjectsFile === undefined) delete process.env.NIATSCIRCUIT_PROJECTS_FILE;
+  else process.env.NIATSCIRCUIT_PROJECTS_FILE = savedProjectsFile;
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

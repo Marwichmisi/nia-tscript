@@ -158,4 +158,25 @@ describe("S9-B MCP — fab_export V1", () => {
     expect(out.ready).toBe(false);
     expect(out.message).toMatch(/compile en erreur/);
   }, 90000);
+
+  test("#39 — DRC rouge (placement overlap) → fab_export bloqué, aucun fichier", async () => {
+    const { client, transport } = await connect();
+    try {
+      await client.callTool({
+        name: "code_patch",
+        arguments: {
+          anchor: `<resistor name="R2" resistance="10k" footprint="0402" pcbX={-5} pcbY={-4} />`,
+          replacement: `<resistor name="R2" resistance="10k" footprint="0402" pcbX={-5} pcbY={4} />`,
+        },
+      });
+    } finally {
+      await transport.close();
+    }
+    const out = await callFab({});
+    expect(out.ready).toBe(false);
+    expect(out.errors).toBeGreaterThanOrEqual(1);
+    expect(out.message).toMatch(/DRC rouge/);
+    expect(out.exportDir).toBe("");
+    expect(out.artifacts).toEqual([]);
+  }, 120000);
 });

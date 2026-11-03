@@ -22,6 +22,34 @@ function mockFetch(routes: Record<string, { status: number; body: unknown }>) {
   };
 }
 
+// Mock par URL exacte (ticket #41) : chaque URL attendue est stubbée
+// individuellement — une URL non stubbée (ou un retry silencieux) échoue
+// au lieu d'être routée par préfixe. Expose les appels via `calls`.
+type ExactRoute = { status: number; body?: unknown; jsonThrows?: boolean } | Error;
+function mockFetchExact(routes: Record<string, ExactRoute>) {
+  const calls: string[] = [];
+  const fn = (async (url: unknown) => {
+    const u = String(url);
+    calls.push(u);
+    const route = routes[u];
+    if (route === undefined) throw new Error(`fetch inattendu (URL exacte non stubbée) : ${u}`);
+    if (route instanceof Error) throw route;
+    return {
+      ok: route.status >= 200 && route.status < 300,
+      status: route.status,
+      json: async () => {
+        if (route.jsonThrows) throw new SyntaxError("Unexpected token '<', \"<html>...\" is not valid JSON");
+        return route.body;
+      },
+      text: async () => JSON.stringify(route.body),
+    };
+  }) as unknown as typeof fetch & { calls: string[] };
+  fn.calls = calls;
+  return fn;
+}
+
+const SEARCH_URL = (q: string) => `https://jlcsearch.tscircuit.com/api/search?q=${encodeURIComponent(q)}`;
+
 describe("S9-A — sourcing.searchParts pur", () => {
   test("query vide → erreur exploitable, aucun fetch", async () => {
     let called = 0;
@@ -225,5 +253,73 @@ describe("S9-A — sourcing.searchParts pur", () => {
   test("doc API exacte tsci présente (search + import --jlcpcb)", () => {
     expect(TSCI_SEARCH_DOC).toMatch(/tsci search --jlcpcb/);
     expect(TSCI_IMPORT_DOC).toMatch(/tsci import.*--jlcpcb/);
+  });
+
+  test("HTTP 500 → erreur serveur distinguée, un seul fetch (sans retry)", async () => {
+    const fetchFn = mockFetchExact({ [SEARCH_URL("10k")]: { status: 500, body: { error: "boom" } } });
+    const res = await searchParts("10k", { fetchFn });
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("attendu erreur");
+    expect(res.message).toMatch(/HTTP 500/);
+    expect(res.message).toMatch(/indisponible|serveur/);
+    expect(res.message).toMatch(/réessayez plus tard/);
+    expect(fetchFn.calls.length).toBe(1);
+  });
+
+  test("HTTP 429 → erreur quota distinguée, un seul fetch (sans retry)", async () => {
+    const fetchFn = mockFetchExact({ [SEARCH_URL("10k")]: { status: 429, body: { error: "slow down" } } });
+    const res = await searchParts("10k", { fetchFn });
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("attendu erreur");
+    expect(res.message).toMatch(/HTTP 429/);
+    expect(res.message).toMatch(/saturé|quota|rate-limit/);
+    expect(res.message).toMatch(/patientez/);
+    expect(fetchFn.calls.length).toBe(1);
+  });
+
+  test("timeout fetch → erreur timeout distinguée", async () => {
+    const timeoutErr = Object.assign(new Error("fetch failed: timeout"), { name: "TimeoutError" });
+    const fetchFn = mockFetchExact({ [SEARCH_URL("10k")]: timeoutErr });
+    const res = await searchParts("10k", { fetchFn });
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("attendu erreur");
+    expect(res.message).toMatch(/timeout|interrompue/);
+    expect(fetchFn.calls.length).toBe(1);
+  });
+
+  test("fetch avorté (AbortError) → erreur timeout distinguée", async () => {
+    const fetchFn = mockFetchExact({ [SEARCH_URL("10k")]: new DOMException("This operation was aborted", "AbortError") });
+    const res = await searchParts("10k", { fetchFn });
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("attendu erreur");
+    expect(res.message).toMatch(/timeout|interrompue/);
+  });
+
+  test("JSON invalide → erreur JSON distinguée", async () => {
+    const fetchFn = mockFetchExact({ [SEARCH_URL("10k")]: { status: 200, jsonThrows: true } });
+    const res = await searchParts("10k", { fetchFn });
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("attendu erreur");
+    expect(res.message).toMatch(/JSON invalide|illisible/);
+  });
+
+  test("footprinter_string farfelue → rejetée localement, fallback compilé obligatoire", async () => {
+    const fetchFn = mockFetchExact({
+      [SEARCH_URL("zzz")]: {
+        status: 200,
+        body: { components: [{ lcsc: 777001, mfr: "X", package: "zzz-not-a-package", description: "bidule", stock: 5 }] },
+      },
+      "https://jlcsearch.tscircuit.com/api/footprinter_strings/C777001": {
+        status: 200,
+        body: { component_footprinter_details: { lcsc: 777001, footprinter_string: "{{{ ceci n'est pas un DSL" } },
+      },
+    });
+    const res = await searchParts("zzz", { fetchFn });
+    expect(res.ok).toBe(true);
+    if (!res.ok) throw new Error("attendu ok");
+    expect(res.results[0]!.footprinterString).toBeNull();
+    expect(res.results[0]!.footprintSource).toBe("fallback-package");
+    const gen = generateFootprintDsl(res.results[0]!.footprint);
+    expect(gen.ok).toBe(true);
   });
 });
