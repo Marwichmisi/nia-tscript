@@ -1336,6 +1336,8 @@ export function buildFactory() {
           };
         }
         // Priorité <Projet ouvert>/previews/, fallback override tests / cache global.
+        // `PCB_MCP_PREVIEW_DIR` est un hook de TEST (revue #37 item 4) : jamais
+        // posé par le backend prod, non contrôlable via MCP.
         const previewOverride = (process.env.PCB_MCP_PREVIEW_DIR ?? "").trim();
         const projectDir = projPrev ? projectPreviewsDir(projPrev) : "";
         const previewDirEff = projectDir || previewOverride;
@@ -1950,6 +1952,8 @@ export function buildFactory() {
           };
         }
         const fab = await exportFab(compiled.circuitJson as unknown[], {
+          // `PCB_MCP_EXPORT_DIR` est un hook de TEST (revue #37 item 4) :
+          // jamais posé par le backend prod, non contrôlable via MCP.
           projectName: (process.env.PCB_MCP_EXPORT_DIR ?? "").trim()
             ? (project_name ?? path.basename(projFab))
             : path.basename(projFab),
@@ -1983,6 +1987,8 @@ export function buildFactory() {
         const out = fab as FabOk;
         // Override tests PCB_MCP_EXPORT_DIR prioritaire (suites historiques),
         // sinon <projet>/exports/<basename>-<hash12(canonique)> (homonymes distingués).
+        // `PCB_MCP_EXPORT_DIR` est un hook de TEST (revue #37 item 4) : jamais
+        // posé par le backend prod, non contrôlable via MCP.
         const exportOverride = (process.env.PCB_MCP_EXPORT_DIR ?? "").trim();
         const dir = exportOverride
           ? path.join(exportOverride, sanitizeSegment(sessionId), sanitizeSegment(out.projectName))
