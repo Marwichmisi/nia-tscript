@@ -117,9 +117,78 @@ export interface SavedPreview {
   path: string;
   previewUrl: string;
   updatedAt: string;
+  /** Captures PNG conservées dans le dossier après éviction LRU. */
+  totalFiles: number;
+  /** Fichiers évincés par ce dépôt (0 en régime normal). */
+  evicted: number;
 }
 
 const PNG_PREFIX = "data:image/png;base64,";
+
+/** Plafond capture (ticket #42) : refus au-delà de 20 Mo. */
+export const PREVIEW_MAX_BYTES = 20 * 1024 * 1024;
+
+/** Plafond captures par dossier (ticket #42) : 50 fichiers, éviction LRU. */
+export const PREVIEW_MAX_FILES = 50;
+
+/** Compteur exposé pour la future GC : captures PNG + octets du dossier. */
+export function previewCount(dir: string): { files: number; bytes: number } {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return { files: 0, bytes: 0 };
+  }
+  let files = 0;
+  let bytes = 0;
+  for (const f of entries) {
+    if (!f.endsWith(".png")) continue;
+    try {
+      const st = fs.statSync(path.join(dir, f));
+      if (st.isFile()) {
+        files += 1;
+        bytes += st.size;
+      }
+    } catch {
+      /* entrée volatilisée entre-temps */
+    }
+  }
+  return { files, bytes };
+}
+
+/** Évince les captures les moins récentes au-delà du plafond (avec leur
+ *  méta JSON). Retourne le compteur à jour. */
+function enforcePreviewQuota(dir: string): { evicted: number; totalFiles: number } {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return { evicted: 0, totalFiles: 0 };
+  }
+  const pngs: Array<{ file: string; mtime: number }> = [];
+  for (const f of entries) {
+    if (!f.endsWith(".png")) continue;
+    try {
+      pngs.push({ file: f, mtime: fs.statSync(path.join(dir, f)).mtimeMs });
+    } catch {
+      /* entrée volatilisée entre-temps */
+    }
+  }
+  pngs.sort((a, b) => a.mtime - b.mtime);
+  let evicted = 0;
+  while (pngs.length > PREVIEW_MAX_FILES) {
+    const oldest = pngs.shift();
+    if (!oldest) break;
+    try {
+      fs.rmSync(path.join(dir, oldest.file), { force: true });
+      fs.rmSync(path.join(dir, `${oldest.file.slice(0, -".png".length)}.json`), { force: true });
+    } catch {
+      /* best-effort */
+    }
+    evicted += 1;
+  }
+  return { evicted, totalFiles: previewCount(dir).files };
+}
 
 export function savePreview(input: SavePreviewInput, dir?: string): SavedPreview {
   const norm = normalizePreviewSource(input.source);
@@ -141,6 +210,12 @@ export function savePreview(input: SavePreviewInput, dir?: string): SavedPreview
   if (buf.length < 8 || buf[0] !== 0x89 || buf[1] !== 0x50) {
     throw new Error("octets PNG invalides (magie PNG absente)");
   }
+  // Quota taille (#42) : refus AVANT toute écriture, dossier inchangé.
+  if (buf.length > PREVIEW_MAX_BYTES) {
+    throw new Error(
+      `capture trop lourde (${buf.length} octets > 20 Mo) : refusez, réduisez la zone ou la résolution — jamais de capture partielle inventée`,
+    );
+  }
   let width = Math.trunc(input.width ?? 0);
   let height = Math.trunc(input.height ?? 0);
   if (!(width > 0 && height > 0)) {
@@ -155,7 +230,9 @@ export function savePreview(input: SavePreviewInput, dir?: string): SavedPreview
   const previewUrl = pathToFileURL(filePath).href;
   const meta = { source, name, bytes: buf.length, width, height, updatedAt, previewUrl };
   fs.writeFileSync(previewMetaPath(source, targetDir, name), JSON.stringify(meta, null, 2));
-  return { source, name, bytes: buf.length, width, height, path: filePath, previewUrl, updatedAt };
+  // Quota nombre (#42) : éviction LRU au-delà de 50, compteur exposé.
+  const { evicted, totalFiles } = enforcePreviewQuota(targetDir);
+  return { source, name, bytes: buf.length, width, height, path: filePath, previewUrl, updatedAt, totalFiles, evicted };
 }
 
 export interface ReadPreviewResult {

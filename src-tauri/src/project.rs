@@ -4,7 +4,9 @@
 //! `main.tsx / circuit.json / previews/ / exports/`, gabarits vide/demo,
 //! Registre sérialisable. L'I/O Tauri (app_config, lockfile) vit dans lib.rs.
 
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 pub const MAIN_FILE: &str = "main.tsx";
 pub const CIRCUIT_FILE: &str = "circuit.json";
@@ -258,6 +260,35 @@ pub fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+/// Confinement (spec #37, ticket #42) : une opération dossier n'est
+/// autorisée que si le chemin, APRÈS canonicalisation, est un Projet du
+/// Registre. Miroir de `isProjectMember` côté sidecar.
+pub fn is_project_member(input: &str, reg: &Registry) -> bool {
+    let canonical = match canonical_project_path(input) {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(_) => return false,
+    };
+    reg.projects.iter().any(|e| {
+        match canonical_project_path(&e.path) {
+            Ok(p) => p.to_string_lossy() == canonical,
+            Err(_) => e.path == canonical,
+        }
+    })
+}
+
+/// Variante qui retourne le chemin canonique ou une erreur explicite hors
+/// périmètre (jamais de défaut silencieux). Miroir de `assertProjectMember`.
+pub fn assert_project_member(input: &str, reg: &Registry) -> Result<PathBuf, String> {
+    let canonical = canonical_project_path(input)?;
+    if is_project_member(&canonical.to_string_lossy(), reg) {
+        return Ok(canonical);
+    }
+    Err(format!(
+        "hors périmètre (Confinement) : {} — opération refusée, le dossier n'est pas un Projet du Registre",
+        canonical.to_string_lossy()
+    ))
+}
+
 pub fn upsert_registry(reg: &mut Registry, path: &str, now: &str) {
     // Identité canonique (sans slash final, symlinks résolus si existe).
     let p = canonical_project_path(path)
@@ -290,6 +321,75 @@ pub fn forget_registry(reg: &mut Registry, path: &str) {
             reg.last_opened = None;
         }
     }
+}
+
+// --- Ticket #42 : garde suppression backend à jeton usage unique ---------
+// Le dialogue natif seul ne suffit plus (spec #37) : la suppression exige
+// un jeton émis par le backend (`request_delete_token`), consommé en un
+// seul usage par `delete_project_in`. L'oubli ne touche jamais au disque
+// (retrait Registre seul) et il n'y a pas de corbeille en V1.
+
+/// Jetons de suppression en attente : chemin canonique → jeton.
+/// Mémoire seule, jamais persistée : un redémarrage invalide les jetons.
+fn delete_tokens() -> &'static Mutex<HashMap<String, String>> {
+    static TOKENS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    TOKENS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Émet un jeton de suppression à usage unique pour un Projet membre.
+/// Hors périmètre → erreur explicite (aucun jeton émis).
+pub fn request_delete_token(reg: &Registry, path: &str) -> Result<String, String> {
+    let canonical = assert_project_member(path, reg)?;
+    let key = canonical.to_string_lossy().into_owned();
+    let token = crate::boot::generate_token();
+    delete_tokens()
+        .lock()
+        .expect("jetons suppression")
+        .insert(key, token.clone());
+    Ok(token)
+}
+
+/// Consomme le jeton (usage unique) et retourne le chemin canonique.
+/// `Ok` ssi le jeton correspond au dernier émis pour ce Projet ; tout
+/// échec laisse le disque intact (le jeton n'est brûlé qu'en cas de match).
+pub fn consume_delete_token(reg: &Registry, path: &str, token: &str) -> Result<String, String> {
+    let canonical = assert_project_member(path, reg)?;
+    let key = canonical.to_string_lossy().into_owned();
+    let mut guard = delete_tokens().lock().expect("jetons suppression");
+    match guard.get(&key) {
+        Some(expected) if expected == token => {
+            guard.remove(&key);
+            Ok(key)
+        }
+        _ => Err(
+            "jeton de suppression invalide ou déjà utilisé : redemandez request_delete_token".into(),
+        ),
+    }
+}
+
+/// Cœur testable de `forget_project` (lib.rs délègue) : canonicalise, retire
+/// du Registre, persiste — sans jamais toucher au contenu disque.
+pub fn forget_project_in(cache_dir: &Path, path: &str) -> Result<String, String> {
+    let canonical = canonical_project_path(path)?;
+    let key = canonical.to_string_lossy().into_owned();
+    let mut reg = load_registry_file(cache_dir);
+    forget_registry(&mut reg, &key);
+    save_registry_file(cache_dir, &reg)?;
+    Ok(key)
+}
+
+/// Cœur testable de `delete_project` (lib.rs délègue) : appartenance +
+/// jeton usage unique, puis suppression disque + sortie Registre.
+pub fn delete_project_in(cache_dir: &Path, path: &str, token: &str) -> Result<String, String> {
+    let mut reg = load_registry_file(cache_dir);
+    let key = consume_delete_token(&reg, path, token)?;
+    let dir = PathBuf::from(&key);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("suppression dossier : {e}"))?;
+    }
+    forget_registry(&mut reg, &key);
+    save_registry_file(cache_dir, &reg)?;
+    Ok(key)
 }
 
 pub fn parse_registry(text: &str) -> Result<Registry, String> {
@@ -399,6 +499,11 @@ pub fn write_lock_project(cache_dir: &Path, project: Option<&str>) {
         return;
     };
     let _ = std::fs::write(&path, out);
+}
+
+#[cfg(test)]
+pub fn clear_delete_tokens_for_tests() {
+    delete_tokens().lock().expect("jetons suppression").clear();
 }
 
 #[cfg(test)]
@@ -737,6 +842,161 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let err = read_main_file(&base).expect_err("sans main.tsx → erreur");
         assert!(err.contains("lecture main.tsx"), "erreur explicite : {err}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // --- Ticket #42 : Confinement (appartenance Registre après canonicalisation) ---
+
+    fn confinement_tmp(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("nia-confine-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn membre_reconnu_apres_canonicalisation_slash_final() {
+        let dir = confinement_tmp("membre");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut reg = Registry::default();
+        upsert_registry(&mut reg, dir.to_str().unwrap(), "2026-01-01T00:00:00Z");
+        let avec_slash = format!("{}/", dir.to_string_lossy());
+        assert!(is_project_member(&avec_slash, &reg));
+        assert_eq!(
+            assert_project_member(&avec_slash, &reg).unwrap(),
+            canonical_project_path(dir.to_str().unwrap()).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hors_perimetre_erreur_explicite() {
+        let dir = confinement_tmp("hors");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let reg = Registry::default();
+        assert!(!is_project_member(dir.to_str().unwrap(), &reg));
+        let err = assert_project_member(dir.to_str().unwrap(), &reg).expect_err("hors périmètre");
+        assert!(err.contains("hors périmètre"), "explicite : {err}");
+        assert!(err.contains("Confinement"), "terme glossaire : {err}");
+        assert!(err.contains("Registre"), "recours : {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn traversal_refuse_avant_appartenance() {
+        let reg = Registry::default();
+        assert!(assert_project_member("/tmp/../etc", &reg).is_err());
+        assert!(assert_project_member("relatif/x", &reg).is_err());
+    }
+
+    #[test]
+    fn retrait_registre_aussitot_hors_perimetre() {
+        let dir = confinement_tmp("retrait");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut reg = Registry::default();
+        upsert_registry(&mut reg, dir.to_str().unwrap(), "2026-01-01T00:00:00Z");
+        assert!(is_project_member(dir.to_str().unwrap(), &reg));
+        reg.projects.clear();
+        reg.last_opened = None;
+        assert!(!is_project_member(dir.to_str().unwrap(), &reg));
+        assert!(assert_project_member(dir.to_str().unwrap(), &reg).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- Ticket #42 : garde suppression backend à jeton usage unique ------
+
+    fn delete_tmp(name: &str) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("nia-del-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        (base.join("cache"), base.join("projet"))
+    }
+
+    fn registered_project(cache: &Path, dir: &Path) -> Registry {
+        let mut reg = Registry::default();
+        upsert_registry(&mut reg, dir.to_str().unwrap(), "2026-01-01T00:00:00Z");
+        save_registry_file(cache, &reg).expect("registre test");
+        reg
+    }
+
+    #[test]
+    fn suppression_exige_jeton_usage_unique() {
+        clear_delete_tokens_for_tests();
+        let (cache, dir) = delete_tmp("jeton");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.tsx"), "code").unwrap();
+        let reg = registered_project(&cache, &dir);
+        let path = dir.to_str().unwrap();
+        // Sans jeton préalable : refusé, disque intact.
+        assert!(delete_project_in(&cache, path, "jeton-inventé").is_err());
+        assert!(dir.join("main.tsx").exists(), "disque intact après refus");
+        // Jeton émis puis consommé : suppression effective.
+        let token = request_delete_token(&reg, path).expect("jeton émis");
+        assert!(!token.is_empty());
+        delete_project_in(&cache, path, &token).expect("suppression autorisée");
+        assert!(!dir.exists(), "dossier supprimé");
+        assert!(!load_registry_file(&cache).projects.iter().any(|e| e.path == path));
+        // Rejeu du même jeton : refusé (usage unique — le Projet sorti du
+        // Registre est en outre hors périmètre).
+        let rej = delete_project_in(&cache, path, &token).expect_err("rejeu refusé");
+        assert!(
+            rej.contains("déjà utilisé") || rej.contains("invalide") || rej.contains("hors périmètre"),
+            "{rej}"
+        );
+        // Preuve de consommation (pas seulement du retrait Registre) : le
+        // Projet ré-enregistré refuse toujours l'ancien jeton…
+        std::fs::create_dir_all(&dir).unwrap();
+        let reg = registered_project(&cache, &dir);
+        let rej = delete_project_in(&cache, path, &token).expect_err("ancien jeton brûlé");
+        assert!(rej.contains("déjà utilisé") || rej.contains("invalide"), "{rej}");
+        assert!(dir.exists(), "disque intact après rejeu");
+        // …mais un jeton frais fonctionne à nouveau.
+        let fresh = request_delete_token(&reg, path).expect("jeton frais");
+        delete_project_in(&cache, path, &fresh).expect("nouveau jeton valide");
+        assert!(!dir.exists());
+        let _ = std::fs::remove_dir_all(cache.parent().unwrap());
+    }
+
+    #[test]
+    fn suppression_hors_perimetre_refusee_disque_intact() {
+        clear_delete_tokens_for_tests();
+        let (cache, dir) = delete_tmp("hors");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.tsx"), "code").unwrap();
+        let reg = Registry::default();
+        save_registry_file(&cache, &reg).expect("registre vide");
+        // Émission refusée hors périmètre…
+        let err = request_delete_token(&reg, dir.to_str().unwrap()).expect_err("hors périmètre");
+        assert!(err.contains("hors périmètre"), "{err}");
+        // …et consommation directe impossible (pas de jeton à deviner).
+        let err = delete_project_in(&cache, dir.to_str().unwrap(), "deviné").expect_err("refusé");
+        assert!(err.contains("hors périmètre") || err.contains("invalide"), "{err}");
+        assert!(dir.join("main.tsx").exists(), "disque intact");
+        let _ = std::fs::remove_dir_all(cache.parent().unwrap());
+    }
+
+    #[test]
+    fn oubli_ne_touche_jamais_au_disque_pas_de_corbeille() {
+        let (cache, dir) = delete_tmp("oubli");
+        std::fs::create_dir_all(dir.join("previews")).unwrap();
+        std::fs::write(dir.join("main.tsx"), "code").unwrap();
+        std::fs::write(dir.join("previews").join("pcb_2d.png"), "png").unwrap();
+        registered_project(&cache, &dir);
+        let base = cache.parent().unwrap().to_path_buf();
+        forget_project_in(&cache, dir.to_str().unwrap()).expect("oubli");
+        // Disque intact : fichiers présents, aucune corbeille créée.
+        assert!(dir.join("main.tsx").exists());
+        assert!(dir.join("previews").join("pcb_2d.png").exists());
+        let trash: Vec<_> = std::fs::read_dir(&base)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .filter(|n| {
+                let l = n.to_lowercase();
+                l.contains("trash") || l.contains("corbeille")
+            })
+            .collect();
+        assert!(trash.is_empty(), "pas de corbeille en V1 : {trash:?}");
+        // Registre nettoyé.
+        assert!(load_registry_file(&cache).projects.is_empty());
         let _ = std::fs::remove_dir_all(&base);
     }
 }
