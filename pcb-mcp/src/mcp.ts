@@ -794,7 +794,10 @@ export function buildFactory() {
         const asked: CheckDomain = domain ?? "all";
         const code = getCode();
         const compiled = await compileTsx(code, { disableCdnLoading });
-        if (compiled.errors !== 0) {
+        // Runner en échec (exception) → pas de circuit-json exploitable.
+        // Les erreurs embarquées (soft) n'empêchent pas le gate (#39 : gate
+        // placement inchangé, évalué sur le circuit-json réel).
+        if (compiled.mode === "echec") {
           const output = {
             sessionId,
             domain: asked,
@@ -839,7 +842,12 @@ export function buildFactory() {
             structuredContent: output,
           };
         }
-        const violations = await runDomainChecks(compiled.circuitJson, asked);
+        let violations = await runDomainChecks(compiled.circuitJson, asked);
+        // Gate dur (#39) : domain=all ne fournit plus de routage quand le
+        // routage est interdit (placement non vert). Gate placement inchangé.
+        if (asked === "all" && !gate.routingAllowed) {
+          violations = violations.filter((v) => v.domain !== "routing");
+        }
         const counts = {
           netlist: violations.filter((v) => v.domain === "netlist").length,
           placement: violations.filter((v) => v.domain === "placement").length,
@@ -861,8 +869,9 @@ export function buildFactory() {
           blockReason: gate.blockReason,
           counts,
           violations,
-          errors: 0,
-          warnings: 0,
+          // Compteurs réels (#39) : erreurs/warnings embarqués du circuit-json.
+          errors: compiled.errors,
+          warnings: compiled.warnings,
         };
         return {
           content: [{ type: "text", text: JSON.stringify(output) }],
@@ -1595,6 +1604,43 @@ export function buildFactory() {
             structuredContent: output,
           };
         }
+        // Gate DRC obligatoire avant export (#39) : placement vert exigé et
+        // zéro violation tous domaines (routing exclu si interdit, comme run_checks).
+        const gate = await runPlacementGate(compiled.circuitJson, code);
+        const allViolations = await runDomainChecks(compiled.circuitJson, "all");
+        const drcViolations = gate.routingAllowed
+          ? allViolations
+          : allViolations.filter((v) => v.domain !== "routing");
+        if (!gate.placementGreen || drcViolations.length > 0) {
+          const reason =
+            gate.blockReason ?? `${drcViolations.length} violation(s) DRC à corriger`;
+          setDrcViolations(drcViolations.length);
+          appendLog("error", "export", `fab_export refusé : DRC rouge — ${reason}`);
+          const output = {
+            sessionId,
+            ready: false as const,
+            mode: "refuse",
+            banner: compiled.banner,
+            errors: 1,
+            warnings: 0,
+            counts: { gerberFiles: 0, bomRows: 0, pnpRows: 0 },
+            gerberNames: [],
+            gerberPreview: "",
+            bomCsv: "",
+            pnpCsv: "",
+            kicad: { pcbBytes: 0, schBytes: 0, proBytes: 0, pcbPreview: "" },
+            kicadZip: { bytes: 0, previewUrl: "" },
+            fabZip: { bytes: 0, previewUrl: "" },
+            artifacts: [],
+            exportDir: "",
+            message: `DRC rouge : ${reason} — corrigez via code_patch/run_checks avant tout export`,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        }
+        setDrcViolations(0);
         const fab = await exportFab(compiled.circuitJson as unknown[], {
           projectName: (process.env.PCB_MCP_EXPORT_DIR ?? "").trim()
             ? (project_name ?? path.basename(projFab))
