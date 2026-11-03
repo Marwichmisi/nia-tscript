@@ -1650,8 +1650,12 @@ export function buildFactory() {
         },
       },
       async ({ session_id, query, source, limit, disableCdnLoading }) => {
-        if (!currentProjectPath()) {
-          const err = noProjectError("search_parts");
+        const projSp = currentProjectPath();
+        // Confinement (#42, revue #37 item 3) : comme les 5 autres outils,
+        // search_parts exige un Projet membre du Registre.
+        const scopeErrSp = checkConfined("search_parts", projSp);
+        if (!projSp || scopeErrSp) {
+          const err = scopeErrSp ?? noProjectError("search_parts");
           const output = {
             sessionId: session_id ?? "default",
             query: (query ?? "").trim(),
