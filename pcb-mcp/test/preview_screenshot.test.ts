@@ -73,7 +73,7 @@ beforeAll(async () => {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "nia-preview-lock-"));
   process.env.NIATSCIRCUIT_MCP_LOCK = path.join(tmpRoot, "mcp.json");
   process.env.NIATSCIRCUIT_PROJECTS_FILE = path.join(tmpRoot, "projects.json");
-  (globalThis as Record<string, string>).__niaPreviewTmpRoot = tmpRoot;
+  (globalThis as unknown as Record<string, string>).__niaPreviewTmpRoot = tmpRoot;
   PORT = await freePort();
   server = await startServer({ port: PORT, token: TOKEN });
   baseUrl = `http://127.0.0.1:${PORT}/mcp`;
@@ -84,7 +84,7 @@ afterAll(() => {
   delete process.env.PCB_MCP_PREVIEW_DIR;
   delete process.env.NIATSCIRCUIT_MCP_LOCK;
   delete process.env.NIATSCIRCUIT_PROJECTS_FILE;
-  const tmpRoot = (globalThis as Record<string, string>).__niaPreviewTmpRoot;
+  const tmpRoot = (globalThis as unknown as Record<string, string>).__niaPreviewTmpRoot;
   if (tmpRoot) fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
