@@ -5,6 +5,13 @@
 // (mcp.ts) : snapshot avant, compile une fois après, restore si échec.
 import { applyAnchoredPatch } from "./patch.js";
 import {
+  DEFAULT_ROUTE_EFFORT,
+  isRouteEffort,
+  ROUTE_EFFORTS,
+  withLocalAutorouter,
+  type RouteEffort,
+} from "./board.js";
+import {
   applyMove,
   applyReassignNet,
   applyRotate,
@@ -16,7 +23,10 @@ export type BatchOp =
   | { kind: "move"; refdes: string; x: number; y: number }
   | { kind: "rotate"; refdes: string; degrees: number }
   | { kind: "swap_package"; refdes: string; footprint: string }
-  | { kind: "reassign_net"; refdes: string; pin: string; net: string };
+  | { kind: "reassign_net"; refdes: string; pin: string; net: string }
+  | { kind: "route"; effort?: RouteEffort };
+
+export type { RouteEffort };
 
 export interface BatchOk {
   ok: true;
@@ -76,11 +86,26 @@ export function applyBatch(code: string, ops: BatchOp[]): BatchOk | BatchErr {
         next = r.code;
         break;
       }
+      case "route": {
+        const effort = (op as { effort?: unknown }).effort ?? DEFAULT_ROUTE_EFFORT;
+        if (!isRouteEffort(effort)) {
+          return {
+            ok: false,
+            failedIndex: i,
+            message:
+              `route : effort invalide "${String(effort)}" (attendu ${ROUTE_EFFORTS.map((e) => `"${e}"`).join(" | ")}, défaut "${DEFAULT_ROUTE_EFFORT}")`,
+          };
+        }
+        const r = withLocalAutorouter(next, effort);
+        if (!r.ok) return { ok: false, failedIndex: i, message: r.message };
+        next = r.code;
+        break;
+      }
       default:
         return {
           ok: false,
           failedIndex: i,
-          message: `op inconnue "${(op as { kind?: unknown }).kind}" (batch V1 : patch | move | rotate | swap_package | reassign_net)`,
+          message: `op inconnue "${(op as { kind?: unknown }).kind}" (batch V1 : patch | move | rotate | swap_package | reassign_net | route)`,
         };
     }
   }

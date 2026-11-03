@@ -7,6 +7,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "dev": "bun src/server.ts serve --port 4123",
+    "postinstall": "bun scripts/fix-peer-zod.mjs",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "matrix": "bun scripts/matrix-v1.mjs"
@@ -30,8 +31,14 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.0.0",
-    "@types/bun": "latest",
+    "@types/bun": "1.4.4",
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
+  },
+  "overrides": {
+    "@tscircuit/eval": { "zod": "3.25.76" },
+    "@tscircuit/circuit-json-util": { "zod": "3.25.76" },
+    "@tscircuit/props": { "zod": "3.25.76" },
+    "@tscircuit/modelprinter": { "zod": "3.25.76" }
   }
 }

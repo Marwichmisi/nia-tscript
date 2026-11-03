@@ -3,6 +3,7 @@
 import { describe, test, expect } from "bun:test";
 import { BOARD_CODE } from "../src/board";
 import { applyBatch } from "../src/batch";
+import { boardExpectsRouting, boardRoutingDisabled, isBoardRouted } from "../src/board";
 
 describe("S10 — batch.ts pur", () => {
   test("lot mixte valide patch + move → code final combiné", () => {
@@ -63,5 +64,82 @@ describe("S10 — batch.ts pur", () => {
     expect(out.code).toContain(`pcbRotation={90}`);
     expect(out.code).toContain(`footprint="0603"`);
     expect(out.code).toContain(`net.GND`);
+  });
+});
+
+describe("S10 — op route pure (ticket #44)", () => {
+  test("route sans effort → autorouter local + effort défaut 1x", () => {
+    const out = applyBatch(BOARD_CODE, [{ kind: "route" }]);
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.code).toContain(`autorouter="auto_local"`);
+    expect(out.code).toContain(`autorouterEffortLevel="1x"`);
+  });
+
+  test("route effort 10x → niveau propagé sur le tag board", () => {
+    const out = applyBatch(BOARD_CODE, [{ kind: "route", effort: "10x" }]);
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.code).toContain(`autorouter="auto_local"`);
+    expect(out.code).toContain(`autorouterEffortLevel="10x"`);
+  });
+
+  test("route idempotent : re-route 10x après 1x → une seule config, valeur remplacée", () => {
+    const first = applyBatch(BOARD_CODE, [{ kind: "route", effort: "1x" }]);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const second = applyBatch(first.code, [{ kind: "route", effort: "10x" }]);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.code).not.toContain(`autorouterEffortLevel="1x"`);
+    expect(second.code).toContain(`autorouterEffortLevel="10x"`);
+    expect(second.code.split(`autorouter="auto_local"`).length - 1).toBe(1);
+  });
+
+  test("route combinée avec move → lot mixte ok", () => {
+    const out = applyBatch(BOARD_CODE, [
+      { kind: "route", effort: "2x" },
+      { kind: "move", refdes: "R1", x: 3, y: -2 },
+    ]);
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.code).toContain(`autorouterEffortLevel="2x"`);
+    expect(out.code).toContain(`pcbX={3}`);
+  });
+
+  test("route effort invalide → échec index 0, message exploitable", () => {
+    const out = applyBatch(BOARD_CODE, [{ kind: "route", effort: "99x" as never }]);
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.failedIndex).toBe(0);
+    expect(out.message).toMatch(/effort/);
+  });
+
+  test("route sans tag board → échec explicite", () => {
+    const out = applyBatch(`export default () => null`, [{ kind: "route" }]);
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.failedIndex).toBe(0);
+    expect(out.message).toMatch(/board/);
+  });
+
+  test("isBoardRouted : faux sur vide, vrai sur circuit-json routé", () => {
+    expect(isBoardRouted([])).toBe(false);
+    expect(isBoardRouted([{ type: "pcb_trace", route: [] }])).toBe(false);
+    expect(
+      isBoardRouted([{ type: "pcb_trace", route: [{ route_type: "wire", x: 0, y: 0 }] }]),
+    ).toBe(true);
+  });
+
+  test("boardRoutingDisabled : détecte routingDisabled sur le tag board", () => {
+    expect(boardRoutingDisabled(BOARD_CODE)).toBe(false);
+    expect(boardRoutingDisabled(BOARD_CODE.replace(`<board width=`, `<board routingDisabled width=`))).toBe(
+      true,
+    );
+  });
+
+  test("boardExpectsRouting : vrai quand le TSX déclare des traces", () => {
+    expect(boardExpectsRouting(BOARD_CODE)).toBe(true);
+    expect(boardExpectsRouting(`export default () => null`)).toBe(false);
   });
 });
