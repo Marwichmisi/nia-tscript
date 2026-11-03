@@ -1,13 +1,16 @@
 mod boot;
 mod preview;
 mod project;
+mod watch;
 
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex, OnceLock,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
+use tauri::Emitter;
 use tauri::Manager;
 
 /// Sidecar `pcb-mcp` (#10) : enfant détaché, tué à la fermeture de l'app.
@@ -28,6 +31,54 @@ fn kill_sidecar() {
         let _ = child.kill();
         let _ = child.wait();
     }
+}
+
+// --- Watcher main.tsx (ticket #43) ------------------------------------------
+// Un seul watch actif : ré-armé à chaque ouverture/création, retiré à la
+// fermeture. Le garde `watch::ProjectMainWatch` vit dans un thread dédié
+// (drop = arrêt) ; seul un drapeau d'arrêt est partagé ici.
+struct ActiveWatch {
+    stop: Arc<AtomicBool>,
+}
+
+static WATCHER: OnceLock<Mutex<Option<ActiveWatch>>> = OnceLock::new();
+
+fn watcher_slot() -> &'static Mutex<Option<ActiveWatch>> {
+    WATCHER.get_or_init(|| Mutex::new(None))
+}
+
+/// (Ré-)arme le watch sur le Projet ouvert, ou l'arrête si Accueil.
+/// L'ancien watch est stoppé avant d'armer le nouveau (jamais deux watches).
+fn rewatch_main(app: &tauri::AppHandle, project: Option<&str>) {
+    if let Some(prev) = watcher_slot().lock().expect("watcher").take() {
+        prev.stop.store(true, Ordering::SeqCst);
+    }
+    let Some(dir) = project else { return };
+    let dir = PathBuf::from(dir);
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        match watch::watch_project_main(&dir, watch::WATCH_DEBOUNCE, move |payload| {
+            let _ = handle.emit(watch::MAIN_CHANGED_EVENT, payload);
+        }) {
+            Ok(_watch) => {
+                // Garde vivant tant que le Projet est ouvert ; stop → drop.
+                while !flag.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+            Err(e) => eprintln!("[watch] {e}"),
+        }
+    });
+    *watcher_slot().lock().expect("watcher") = Some(ActiveWatch { stop });
+}
+
+/// Ré-arme le watcher d'après le Projet courant (à appeler après chaque
+/// changement de `BootState.project_path`).
+fn rewatch_current(app: &tauri::AppHandle, state: &tauri::State<'_, Arc<Mutex<BootState>>>) {
+    let project = state.lock().expect("boot state").project_path.clone();
+    rewatch_main(app, project.as_deref());
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -93,6 +144,7 @@ fn get_boot_state(state: tauri::State<'_, Arc<Mutex<BootState>>>) -> BootState {
 /// Avec Projet ouvert : `<projet>/previews/`, sinon cache global.
 /// Jamais d'image inventée côté MCP : sans fichier, `preview_screenshot`
 /// répond « ouvre l'app ».
+/// Jail Confinement (#42) : le Projet ouvert doit être membre du Registre.
 #[tauri::command]
 fn save_screenshot(
     state: tauri::State<'_, Arc<Mutex<BootState>>>,
@@ -100,29 +152,39 @@ fn save_screenshot(
     data_url: String,
     width: u32,
     height: u32,
+    name: Option<String>,
 ) -> Result<preview::SavedPreview, String> {
     let project = state.lock().expect("boot state").project_path.clone();
     let dir = match project {
-        Some(p) => project::project_paths(std::path::Path::new(&p)).previews,
+        Some(p) => {
+            let reg = load_registry();
+            let confined = project::assert_project_member(&p, &reg)?;
+            project::project_paths(&confined).previews
+        }
         None => {
             let cache = boot::base_cache_dir().ok_or("cache_dir indisponible")?;
             preview::preview_dir(&cache)
         }
     };
-    preview::write_preview(&dir, &source, &data_url, width, height)
+    preview::write_preview(&dir, &source, &data_url, width, height, name.as_deref())
 }
 
 /// Dossier previews partagé (debug UI) : projet ouvert ou cache global.
+/// Jail Confinement (#42) : comme `save_screenshot`.
 #[tauri::command]
 fn get_preview_dir(
     state: tauri::State<'_, Arc<Mutex<BootState>>>,
 ) -> Result<String, String> {
     let project = state.lock().expect("boot state").project_path.clone();
     match project {
-        Some(p) => Ok(project::project_paths(std::path::Path::new(&p))
-            .previews
-            .to_string_lossy()
-            .to_string()),
+        Some(p) => {
+            let reg = load_registry();
+            let confined = project::assert_project_member(&p, &reg)?;
+            Ok(project::project_paths(&confined)
+                .previews
+                .to_string_lossy()
+                .to_string())
+        }
         None => {
             let cache = boot::base_cache_dir().ok_or("cache_dir indisponible")?;
             Ok(preview::preview_dir(&cache).to_string_lossy().to_string())
@@ -164,6 +226,8 @@ fn set_current(state: &tauri::State<'_, Arc<Mutex<BootState>>>, project: Option<
 struct ProjectItem {
     path: String,
     name: String,
+    /// Dossier parent complet (homonymes distingués dans l'Accueil).
+    parent: String,
     exists: bool,
     #[serde(rename = "lastOpened")]
     last_opened: String,
@@ -178,7 +242,13 @@ struct ProjectList {
 
 #[tauri::command]
 fn list_projects() -> Result<ProjectList, String> {
-    let reg = load_registry();
+    let mut reg = load_registry();
+    // Réconciliation boot (ticket #38) : existence vérifiée, orphelin
+    // explicite (`exists: false`), `lastOpened` réparé et persisté.
+    let reconciled = project::reconcile_registry(&mut reg);
+    if reconciled.current_reset {
+        save_registry(&reg)?;
+    }
     let mut items: Vec<ProjectItem> = reg
         .projects
         .iter()
@@ -191,6 +261,7 @@ fn list_projects() -> Result<ProjectList, String> {
                     .and_then(|n| n.to_str())
                     .unwrap_or(&e.path)
                     .to_string(),
+                parent: project::parent_of_project_path(&e.path),
                 exists: p.exists(),
                 last_opened: e.last_opened.clone(),
             }
@@ -206,18 +277,29 @@ fn list_projects() -> Result<ProjectList, String> {
 
 #[tauri::command]
 fn current_project(
+    app: tauri::AppHandle,
     state: tauri::State<'_, Arc<Mutex<BootState>>>,
 ) -> Result<Option<String>, String> {
-    Ok(state.lock().expect("boot state").project_path.clone())
+    let cur = state.lock().expect("boot state").project_path.clone();
+    match cur {
+        // Dossier supprimé (orphelin) → Accueil : réinitialisé, pas fantôme.
+        Some(p) if !std::path::Path::new(&p).exists() => {
+            set_current(&state, None);
+            rewatch_main(&app, None);
+            Ok(None)
+        }
+        other => Ok(other),
+    }
 }
 
 #[tauri::command]
 fn create_project(
+    app: tauri::AppHandle,
     state: tauri::State<'_, Arc<Mutex<BootState>>>,
     path: String,
     template: Option<String>,
 ) -> Result<String, String> {
-    let dir = project::validate_project_path(&path)?;
+    let dir = project::canonical_project_path(&path)?;
     let tpl = template.as_deref().unwrap_or("vide");
     project::ensure_project_layout(&dir, tpl)?;
     let mut reg = load_registry();
@@ -225,15 +307,17 @@ fn create_project(
     save_registry(&reg)?;
     let s = dir.to_string_lossy().to_string();
     set_current(&state, Some(s.clone()));
+    rewatch_current(&app, &state);
     Ok(s)
 }
 
 #[tauri::command]
 fn open_project(
+    app: tauri::AppHandle,
     state: tauri::State<'_, Arc<Mutex<BootState>>>,
     path: String,
 ) -> Result<String, String> {
-    let dir = project::validate_project_path(&path)?;
+    let dir = project::canonical_project_path(&path)?;
     if !dir.exists() {
         return Err("dossier introuvable".into());
     }
@@ -241,45 +325,117 @@ fn open_project(
     if !main.exists() {
         return Err("dossier sans main.tsx : refuse d'ouvrir".into());
     }
+    // Disque source de vérité : circuit.json recréé si absent, migré si
+    // legacy, erreur visible si corrompu (ticket #38).
+    project::ensure_circuit_file(&dir)?;
     let mut reg = load_registry();
     project::upsert_registry(&mut reg, &dir.to_string_lossy(), &project::now_rfc3339());
     save_registry(&reg)?;
     let s = dir.to_string_lossy().to_string();
     set_current(&state, Some(s.clone()));
+    rewatch_current(&app, &state);
     Ok(s)
 }
 
 #[tauri::command]
-fn close_project(state: tauri::State<'_, Arc<Mutex<BootState>>>) -> Result<(), String> {
+fn close_project(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<Mutex<BootState>>>,
+) -> Result<(), String> {
     set_current(&state, None);
+    rewatch_current(&app, &state);
     Ok(())
 }
 
 #[tauri::command]
 fn forget_project(path: String) -> Result<(), String> {
-    let dir = project::validate_project_path(&path)?;
-    let mut reg = load_registry();
-    project::forget_registry(&mut reg, &dir.to_string_lossy());
-    save_registry(&reg)?;
+    let Some(cache) = boot::base_cache_dir() else {
+        return Err("cache_dir indisponible".into());
+    };
+    // L'oubli ne touche jamais au disque (pas de corbeille en V1) :
+    // retrait Registre seul (cf. `project::forget_project_in`).
+    project::forget_project_in(&cache, &path)?;
     Ok(())
+}
+
+/// Émet un jeton de suppression à usage unique (garde backend #42).
+/// Le dialogue natif seul ne suffit plus : `delete_project` exige ce jeton.
+/// Hors périmètre → refusé, aucun jeton émis.
+#[tauri::command]
+fn request_delete_token(path: String) -> Result<String, String> {
+    let reg = load_registry();
+    project::request_delete_token(&reg, &path)
+}
+
+/// Relink un Projet orphelin (ticket #38) : remplace l'ancien chemin par le
+/// nouveau (existant + `main.tsx` requis, circuit garanti) en conservant
+/// l'ordre et `lastOpened`. Le Projet courant suit s'il était l'orphelin.
+#[tauri::command]
+fn relink_project(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<Mutex<BootState>>>,
+    old_path: String,
+    new_path: String,
+) -> Result<String, String> {
+    let old = project::canonical_project_path(&old_path)?;
+    let new = project::canonical_project_path(&new_path)?;
+    if !new.exists() {
+        return Err("nouveau dossier introuvable".into());
+    }
+    if !project::project_paths(&new).main.exists() {
+        return Err("nouveau dossier sans main.tsx : refuse de relier".into());
+    }
+    project::ensure_circuit_file(&new)?;
+    let old_s = old.to_string_lossy().to_string();
+    let new_s = new.to_string_lossy().to_string();
+    let mut reg = load_registry();
+    if !reg.projects.iter().any(|e| e.path == old_s) {
+        return Err("ancien chemin inconnu du Registre".into());
+    }
+    for e in reg.projects.iter_mut() {
+        if e.path == old_s {
+            e.path = new_s.clone();
+            e.last_opened = project::now_rfc3339();
+        }
+    }
+    reg.projects
+        .sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
+    if reg.last_opened.as_deref() == Some(old_s.as_str()) {
+        reg.last_opened = Some(new_s.clone());
+    }
+    save_registry(&reg)?;
+    let cur = state.lock().expect("boot state").project_path.clone();
+    if cur.as_deref() == Some(old_s.as_str()) {
+        set_current(&state, Some(new_s.clone()));
+    }
+    rewatch_current(&app, &state);
+    Ok(new_s)
 }
 
 #[tauri::command]
 fn delete_project(
+    app: tauri::AppHandle,
     state: tauri::State<'_, Arc<Mutex<BootState>>>,
     path: String,
+    token: Option<String>,
 ) -> Result<(), String> {
-    let dir = project::validate_project_path(&path)?;
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).map_err(|e| format!("suppression dossier : {e}"))?;
-    }
-    let mut reg = load_registry();
-    project::forget_registry(&mut reg, &dir.to_string_lossy());
-    save_registry(&reg)?;
+    // Garde backend (#42) : appartenance + jeton usage unique. Le dialogue
+    // natif (frontend) seul ne suffit plus ; sans jeton, refus explicite.
+    let Some(t) = token else {
+        return Err(
+            "confirmation backend requise (jeton manquant) : demandez request_delete_token avant toute suppression"
+                .into(),
+        );
+    };
+    let Some(cache) = boot::base_cache_dir() else {
+        return Err("cache_dir indisponible".into());
+    };
+    let key = project::delete_project_in(&cache, &path, &t)?;
     let cur = state.lock().expect("boot state").project_path.clone();
-    if cur.as_deref() == Some(dir.to_string_lossy().as_ref()) {
+    if cur.as_deref() == Some(key.as_str()) {
         set_current(&state, None);
     }
+    rewatch_current(&app, &state);
     Ok(())
 }
 
@@ -287,6 +443,7 @@ fn delete_project(
 struct ProjectMain {
     path: String,
     code: String,
+    hash: String,
 }
 
 #[tauri::command]
@@ -295,7 +452,7 @@ fn read_project_main(
     path: Option<String>,
 ) -> Result<ProjectMain, String> {
     let target = match path {
-        Some(p) => project::validate_project_path(&p)?.to_string_lossy().to_string(),
+        Some(p) => project::canonical_project_path(&p)?.to_string_lossy().to_string(),
         None => state
             .lock()
             .expect("boot state")
@@ -303,12 +460,31 @@ fn read_project_main(
             .clone()
             .ok_or("aucun projet ouvert")?,
     };
-    let dir = project::validate_project_path(&target)?;
-    let main = project::project_paths(&dir).main;
-    let code = std::fs::read_to_string(&main).map_err(|e| format!("lecture main.tsx : {e}"))?;
+    // Jail Confinement (#42) : lecture refusée hors Registre.
+    let reg = load_registry();
+    let dir = project::assert_project_member(&target, &reg)?;
+    let data = project::read_main_file(&dir)?;
     Ok(ProjectMain {
-        path: dir.to_string_lossy().to_string(),
-        code,
+        path: data.path,
+        code: data.code,
+        hash: data.hash,
+    })
+}
+
+#[tauri::command]
+fn write_project_main(path: String, code: String) -> Result<ProjectMain, String> {
+    // Ticket #45 (coller du TSX, gabarit démo) : écriture frontend autrement
+    // impossible (l'agent écrit via MCP). Même jail que la lecture
+    // (Confinement #42), écriture atomique + hash relu (#38 source de vérité).
+    // Le watcher (#43) émet `project-main-changed` sur le fichier modifié :
+    // la WebView resynchronise sans relecture forcée.
+    let reg = load_registry();
+    let dir = project::assert_project_member(&path, &reg)?;
+    let data = project::write_main_file(&dir, &code)?;
+    Ok(ProjectMain {
+        path: data.path,
+        code: data.code,
+        hash: data.hash,
     })
 }
 
@@ -351,13 +527,22 @@ pub fn run() {
             let handle = app.handle().clone();
             let state = boot_state_setup.clone();
             tauri::async_runtime::spawn(async move {
+                // Pont résolu ici aussi pour le cas échec : l'UI affiche
+                // toujours Copier même si le sidecar est KO.
+                let fallback_bridge = find_bridge(&handle)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 match boot_or_attach(&handle) {
                     Ok(info) => {
+                        // Watcher temps réel (ticket #43) : armé sur le Projet
+                        // rouvert au boot, retiré si Accueil.
+                        rewatch_main(&handle, info.project_path.as_deref());
                         *state.lock().expect("boot state") = info;
                     }
                     Err(e) => {
                         // Jamais de token dans les logs.
                         eprintln!("[boot] échec: {e}");
+                        state.lock().expect("boot state").bridge_path = fallback_bridge;
                     }
                 }
             });
@@ -373,8 +558,11 @@ pub fn run() {
             open_project,
             close_project,
             forget_project,
+            relink_project,
+            request_delete_token,
             delete_project,
-            read_project_main
+            read_project_main,
+            write_project_main
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

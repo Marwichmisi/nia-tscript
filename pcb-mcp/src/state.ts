@@ -2,18 +2,8 @@
 // Le TSX reste la seule source de vérité ; le store en mémoire est initialisé
 // avec la fixture R1/R2+U1 du prototype et muté uniquement via `code_patch`.
 import { BOARD_CODE } from "./board.js";
-import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import {
-  currentProjectPath,
-  ensureProjectLayout,
-  loadRegistry,
-  projectMainPath,
-  saveRegistry,
-  upsertRegistry,
-  writeLockProjectPath,
-} from "./project.js";
+import { currentProjectPath } from "./project.js";
 
 export interface BoardState {
   sessionId: string;
@@ -26,11 +16,18 @@ export interface BoardState {
 
 export const PROTOCOL_VERSION = "2026-07-28";
 
+export function projectBoardName(): string {
+  const proj = currentProjectPath();
+  if (!proj) return "board";
+  const base = path.basename(proj);
+  return base || "board";
+}
+
 export function getBoardState(sessionId = "default"): BoardState {
   const compile = lastCompile ?? { status: "ok" as const, errors: 0, warnings: 0 };
   return {
     sessionId,
-    board: "nia-demo",
+    board: projectBoardName(),
     ready: compile.status === "ok",
     compile,
     drc: { violations: lastDrcViolations },
@@ -54,7 +51,7 @@ export interface HierarchyComponent {
 
 export function getHierarchy() {
   return {
-    board: "nia-demo",
+    board: projectBoardName(),
     sessionId: "default",
     modules: [
       {
@@ -111,7 +108,11 @@ let currentCode: string = BOARD_CODE;
 let lastCompile: BoardState["compile"] | null = null;
 let lastDrcViolations = 0;
 
-/** Remet le store à la fixture (isolation des tests). Garantit aussi un Projet ouvert en test (sinon gating NO_PROJECT_OPEN ferait échouer les suites historiques). */
+/** Remet le store mémoire à la fixture (isolation des tests).
+ *  Ne crée JAMAIS de Projet sur disque (ticket #38) : sans Projet ouvert
+ *  explicite, les outils gated répondent le vrai `NO_PROJECT_OPEN`
+ *  (fini la fixture démo masquante). Les suites qui ont besoin d'un Projet
+ *  l'ouvrent explicitement (cf. `pcb-mcp/test/helpers.ts`). */
 export function resetStoreForTests(): void {
   LOGS.length = 0;
   LOGS.push(...SEED_LOGS);
@@ -119,24 +120,6 @@ export function resetStoreForTests(): void {
   currentCode = BOARD_CODE;
   lastCompile = null;
   lastDrcViolations = 0;
-  try {
-    if (!currentProjectPath()) {
-      const dir = path.join(os.tmpdir(), "nia-mcp-test-proj");
-      ensureProjectLayout(dir, "vide");
-      // main.tsx vide → recharge fixture démo en mémoire pour les assertions historiques.
-      try {
-        fs.writeFileSync(projectMainPath(dir), BOARD_CODE);
-      } catch {
-        /* best-effort */
-      }
-      const reg = loadRegistry();
-      saveRegistry(upsertRegistry(reg, dir));
-      writeLockProjectPath(dir);
-      currentCode = BOARD_CODE;
-    }
-  } catch {
-    /* best-effort : sans projet test, les outils gated répondront NO_PROJECT_OPEN */
-  }
 }
 
 export function getCode(): string {

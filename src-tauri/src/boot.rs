@@ -113,20 +113,94 @@ pub fn build_lock(port: u16, token: String) -> McpLock {
     }
 }
 
-/// Écrit le lockfile (crée les parents), mode 0600 sur Unix.
-pub fn write_lockfile(path: &Path, lock: &McpLock) -> io::Result<()> {
+/// Écriture atomique (tmp + rename + fsync fichier + fsync dossier) : un kill
+/// en pleine écriture laisse l'ancien contenu intact ou le nouveau complet —
+/// jamais un JSON tronqué. Écrivain unique : tout write lockfile/Registre
+/// (`write_lockfile`, `project::save_registry_file`) passe par ici.
+/// (Miroir de `atomicWriteFileSync` côté sidecar.)
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write as _;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let tmp = path.with_extension(format!(
+        "tmp.{}.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+        n
+    ));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    #[cfg(windows)]
+    {
+        // `rename` Windows refuse d'écraser : suppression préalable (fenêtre
+        // de race minimale, le tmp reste isolé en cas de kill).
+        let _ = std::fs::remove_file(path);
+    }
+    let renamed = std::fs::rename(&tmp, path);
+    if renamed.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    renamed?;
+    if let Some(parent) = path.parent() {
+        if let Ok(d) = std::fs::File::open(parent) {
+            let _ = d.sync_all();
+        }
+    }
+    Ok(())
+}
+
+/// Écrit le lockfile (crée les parents), mode 0600 sur Unix.
+/// Atomique (cf. `atomic_write`) : kill en pleine écriture → lock intact.
+/// Windows : équivalent 0600 via `icacls` (héritage coupé, seul
+/// l'utilisateur courant garde R/W) — refus explicite si durcissement KO.
+pub fn write_lockfile(path: &Path, lock: &McpLock) -> io::Result<()> {
     let json = serde_json::to_string_pretty(lock)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, json)?;
+    atomic_write(path, json.as_bytes())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
+    #[cfg(windows)]
+    {
+        harden_lockfile_windows(path)?;
+    }
     Ok(())
+}
+
+/// Équivalent 0600 Windows (ticket #42) : coupe l'héritage ACL et n'accorde
+/// que l'utilisateur courant (R,W). Échec → erreur (fail-closed : jamais de
+/// lockfile lisible par tous).
+#[cfg(windows)]
+fn harden_lockfile_windows(path: &Path) -> io::Result<()> {
+    let user = std::env::var("USERNAME").map_err(|_| {
+        io::Error::new(io::ErrorKind::NotFound, "USERNAME introuvable (durcissement lockfile)")
+    })?;
+    let status = std::process::Command::new("icacls.exe")
+        .arg(path)
+        .arg("/inheritance:r")
+        .arg("/grant:r")
+        .arg(format!("{user}:(R,W)"))
+        .status()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("icacls indisponible : {e}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("icacls a refusé le durcissement ({status})"),
+        ))
+    }
 }
 
 pub fn read_lockfile(path: &Path) -> io::Result<McpLock> {
@@ -387,12 +461,38 @@ pub fn sidecar_candidate_paths() -> Vec<PathBuf> {
     out
 }
 
-/// Premier candidat existant et non-vide, sinon `None`
+/// Premier candidat de confiance (cf. `find_trusted_in`), sinon `None`
 /// (le boot retombe alors sur le stub interne #9).
 pub fn find_sidecar_bin() -> Option<PathBuf> {
-    sidecar_candidate_paths().into_iter().find(|p| {
-        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() > 0)
-    })
+    find_trusted_in(&sidecar_candidate_paths())
+}
+
+/// Sélection testable (ticket #42) : refuse le stub (trop petit pour servir
+/// un MCP) et le binaire world-writable (n'importe quel utilisateur local
+/// pourrait le remplacer avant exécution).
+pub fn find_trusted_in(candidates: &[PathBuf]) -> Option<PathBuf> {
+    candidates.iter().find(|p| is_trusted_sidecar_bin(p)).cloned()
+}
+
+fn is_trusted_sidecar_bin(path: &Path) -> bool {
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    if !meta.is_file() || meta.len() == 0 {
+        return false;
+    }
+    if !is_real_sidecar_bin(path) {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o002 != 0 {
+            return false;
+        }
+    }
+    true
 }
 
 // --- Pont MCP embarqué (#26) -------------------------------------------------
@@ -420,7 +520,6 @@ pub fn find_bridge_in(candidates: &[PathBuf]) -> Option<PathBuf> {
 /// Vrai binaire compilé (`bun build --compile` ≈ 100 Mo) vs stub shell
 /// (`scripts/ensure-sidecar-stub.sh`, quelques octets) : heuristique de
 /// taille pour les tests (le stub ne sert aucun MCP).
-#[allow(dead_code)]
 pub fn is_real_sidecar_bin(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.len() > 1_000_000)
 }
@@ -552,8 +651,29 @@ mod tests {
     }
 
     #[test]
-    fn read_rejects_invalid() {
-        let dir = std::env::temp_dir().join(format!(
+    fn lockfile_atomique_crash_tmp_cible_intacte() {
+        let dir = std::env::temp_dir().join(format!("nia-boot-crash-{}", std::process::id()));
+        let path = dir.join("niatscircuit/mcp.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        let lock = build_lock(pick_free_port().unwrap(), generate_token());
+        write_lockfile(&path, &lock).expect("lock initial");
+        // Kill simulé en pleine écriture : tmp abandonné, jamais renommé.
+        std::fs::write(path.with_extension("json.999.tmp"), "{tronqué").unwrap();
+        assert_eq!(read_lockfile(&path).expect("lock intact"), lock);
+        let leftovers: Vec<_> = std::fs::read_dir(dir.join("niatscircuit"))
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            // Le tmp simulé est volontaire ; l'écrivain n'en laisse aucun.
+            .filter(|n| n.contains(".tmp.") && !n.contains("999"))
+            .collect();
+        assert!(leftovers.is_empty(), "tmp résiduels : {leftovers:?}");
+        write_lockfile(&path, &lock).expect("réécriture atomique");
+        assert_eq!(read_lockfile(&path).expect("re-lit"), lock);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_rejects_invalid() {        let dir = std::env::temp_dir().join(format!(
             "nia-boot-invalid-{}",
             std::process::id()
         ));
@@ -698,6 +818,67 @@ mod tests {
             !super::wait_ready(&url, "tok", Duration::from_millis(300)),
             "port fermé => pas ready"
         );
+    }
+
+    // --- Ticket #42 : refus sidecar world-writable / stub ---------------
+
+    fn trust_tmp(name: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("nia-trust-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    #[cfg(unix)]
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn sidecar_refuse_stub_et_world_writable() {
+        let base = trust_tmp("refus");
+        // Stub shell (+x mais minuscule) : refusé partout.
+        let stub = base.join("pcb-mcp-stub");
+        std::fs::write(&stub, "#!/bin/sh\necho stub\n").unwrap();
+        #[cfg(unix)]
+        chmod(&stub, 0o755);
+        assert_eq!(super::find_trusted_in(&[stub.clone()]), None);
+        // Faux binaire (taille réelle) world-writable : refusé sur Unix.
+        let big = base.join("pcb-mcp-big");
+        std::fs::write(&big, vec![0u8; 1_000_001]).unwrap();
+        #[cfg(unix)]
+        {
+            chmod(&big, 0o777);
+            assert_eq!(
+                super::find_trusted_in(&[big.clone()]),
+                None,
+                "world-writable refusé"
+            );
+            // Mêmes octets, permissions saines : accepté.
+            chmod(&big, 0o755);
+            assert_eq!(super::find_trusted_in(&[big.clone()]), Some(big.clone()));
+            // Ordre : le premier candidat de confiance gagne.
+            assert_eq!(
+                super::find_trusted_in(&[stub, big]),
+                super::find_trusted_in(&[base.join("pcb-mcp-big")])
+            );
+        }
+        // Inexistant : jamais de panique, pas de repli silencieux.
+        assert_eq!(super::find_trusted_in(&[base.join("absent")]), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lockfile_durci_proprietaire_seul_windows() {
+        let dir = std::env::temp_dir().join(format!("nia-lock-win-{}", std::process::id()));
+        let path = dir.join("niatscircuit/mcp.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        let lock = super::build_lock(5123, super::generate_token());
+        super::write_lockfile(&path, &lock).expect("lockfile durci Windows");
+        assert_eq!(super::read_lockfile(&path).expect("re-lit"), lock);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// E2E sidecar réel (#10) : spawn + readiness + guards HTTP.

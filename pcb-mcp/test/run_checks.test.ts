@@ -9,11 +9,13 @@ import { Client } from "@modelcontextprotocol/client";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { startServer } from "../src/http";
 import { resetStoreForTests } from "../src/state";
+import { ensureTestProject, setupIsolatedRegistry, type IsolatedEnv } from "./helpers";
 
 const TOKEN = "test-checks-" + Math.random().toString(36).slice(2);
 let PORT = 0;
 let server: Server;
 let baseUrl = "";
+let env: IsolatedEnv;
 
 function freePort(): Promise<number> {
   return new Promise((resolve) => {
@@ -66,6 +68,7 @@ async function callChecks(args: Record<string, unknown>): Promise<ChecksOutput> 
 }
 
 beforeAll(async () => {
+  env = setupIsolatedRegistry("nia-checks-");
   PORT = await freePort();
   server = await startServer({ port: PORT, token: TOKEN });
   baseUrl = `http://127.0.0.1:${PORT}/mcp`;
@@ -73,10 +76,12 @@ beforeAll(async () => {
 
 afterAll(() => {
   server.close();
+  env.restore();
 });
 
 beforeEach(() => {
   resetStoreForTests();
+  ensureTestProject();
 });
 
 describe("S7-B — run_checks + gate placement", () => {
@@ -98,6 +103,8 @@ describe("S7-B — run_checks + gate placement", () => {
     expect(out.counts.total).toBe(0);
     expect(out.violations).toEqual([]);
     expect(out.errors).toBe(0);
+    // Warnings embarqués réels (#39) : 7 sur la fixture, même verdict vert.
+    expect(out.warnings).toBe(7);
   }, 90000);
 
   test("board valide → routing autorisé (domain routing)", async () => {
@@ -148,5 +155,32 @@ describe("S7-B — run_checks + gate placement", () => {
     expect(out.routingAllowed).toBe(false);
     expect(out.errors).toBe(1);
     expect(out.blockReason).toMatch(/placement non vert/);
+  }, 120000);
+
+  test("#39 — domain=all + placement rouge → aucun routage fourni", async () => {
+    const { client, transport } = await connect();
+    try {
+      await client.callTool({
+        name: "code_patch",
+        arguments: {
+          anchor: `<resistor name="R2" resistance="10k" footprint="0402" pcbX={-5} pcbY={-4} />`,
+          replacement: `<resistor name="R2" resistance="10k" footprint="0402" pcbX={-5} pcbY={4} />`,
+        },
+      });
+    } finally {
+      await transport.close();
+    }
+    const out = await callChecks({ domain: "all" });
+    expect(out.placementGreen).toBe(false);
+    expect(out.routingAllowed).toBe(false);
+    expect(out.blockReason).toMatch(/placement non vert/);
+    // Erreurs embarquées réelles (#39) remontées même quand le gate parle.
+    expect(out.errors).toBeGreaterThanOrEqual(1);
+    expect(out.violations.every((v) => v.domain !== "routing")).toBe(true);
+    expect(out.counts.routing).toBe(0);
+    expect(out.counts.placement).toBeGreaterThanOrEqual(1);
+    expect(out.counts.total).toBe(
+      out.counts.netlist + out.counts.placement + out.counts.style,
+    );
   }, 120000);
 });

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180" role="img" aria-labelledby="fit fid">
+<title id="fit">nia.tscript - icon</title>
+<desc id="fid">N-trace seul, icone app Tauri et favicon</desc>
+<path d="M52 144 V68 L72 42 H92 L140 106 V42" fill="none" stroke="#FF5A00" stroke-width="26" stroke-linecap="butt" stroke-linejoin="round"/>
+<circle cx="52" cy="144" r="16" fill="#111114"/><circle cx="52" cy="144" r="6" fill="white"/>
+<circle cx="140" cy="42" r="16" fill="#111114"/><circle cx="140" cy="42" r="6" fill="white"/>
+</svg>

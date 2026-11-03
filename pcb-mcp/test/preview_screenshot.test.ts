@@ -9,7 +9,9 @@ import { Client } from "@modelcontextprotocol/client";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { startServer } from "../src/http";
 import { resetStoreForTests } from "../src/state";
+import { ensureTestProject } from "./helpers";
 import { savePreview } from "../src/preview";
+import { currentProjectPath, projectPreviewsDir } from "../src/project";
 
 const TOKEN = "test-preview-" + Math.random().toString(36).slice(2);
 let PORT = 0;
@@ -69,6 +71,13 @@ async function callPreview(args: Record<string, unknown>): Promise<PreviewOutput
 beforeAll(async () => {
   previewDir = fs.mkdtempSync(path.join(os.tmpdir(), "nia-preview-mcp-"));
   process.env.PCB_MCP_PREVIEW_DIR = previewDir;
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "nia-preview-lock-"));
+  (globalThis as unknown as Record<string, string | undefined>).__niaSavedLock = process.env.NIATSCIRCUIT_MCP_LOCK;
+  (globalThis as unknown as Record<string, string | undefined>).__niaSavedProjectsFile =
+    process.env.NIATSCIRCUIT_PROJECTS_FILE;
+  process.env.NIATSCIRCUIT_MCP_LOCK = path.join(tmpRoot, "mcp.json");
+  process.env.NIATSCIRCUIT_PROJECTS_FILE = path.join(tmpRoot, "projects.json");
+  (globalThis as unknown as Record<string, string>).__niaPreviewTmpRoot = tmpRoot;
   PORT = await freePort();
   server = await startServer({ port: PORT, token: TOKEN });
   baseUrl = `http://127.0.0.1:${PORT}/mcp`;
@@ -77,11 +86,30 @@ beforeAll(async () => {
 afterAll(() => {
   server.close();
   delete process.env.PCB_MCP_PREVIEW_DIR;
+  const savedLock = (globalThis as unknown as Record<string, string | undefined>).__niaSavedLock;
+  const savedProjectsFile = (globalThis as unknown as Record<string, string | undefined>).__niaSavedProjectsFile;
+  if (savedLock === undefined) delete process.env.NIATSCIRCUIT_MCP_LOCK;
+  else process.env.NIATSCIRCUIT_MCP_LOCK = savedLock;
+  if (savedProjectsFile === undefined) delete process.env.NIATSCIRCUIT_PROJECTS_FILE;
+  else process.env.NIATSCIRCUIT_PROJECTS_FILE = savedProjectsFile;
+  const tmpRoot = (globalThis as unknown as Record<string, string>).__niaPreviewTmpRoot;
+  if (tmpRoot) fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
 beforeEach(() => {
   resetStoreForTests();
+  // Projet explicite (ticket #38) : le chemin "sans screenshot" testé est le
+  // vrai fallback, pas le gating NO_PROJECT_OPEN.
+  ensureTestProject();
   for (const f of fs.readdirSync(previewDir)) fs.rmSync(path.join(previewDir, f), { force: true });
+  // Vide aussi <Projet test>/previews/ pour que le fallback override soit déterministe.
+  try {
+    const proj = currentProjectPath();
+    if (proj) {
+      const d = projectPreviewsDir(proj);
+      if (fs.existsSync(d)) for (const f of fs.readdirSync(d)) fs.rmSync(path.join(d, f), { force: true });
+    }
+  } catch { /* best-effort */ }
 });
 
 describe("S-preview-MCP — preview_screenshot agent", () => {
@@ -136,5 +164,25 @@ describe("S-preview-MCP — preview_screenshot agent", () => {
     const out = await callPreview({ source: "pcb_3d", disableCdnLoading: true });
     expect(out.found).toBe(true);
     expect(out.banner).toMatch(/CDN|RÉSEAU/);
+  });
+
+  test("SANS env, la résolution tombe DANS le Projet (#review-4)", async () => {
+    const saved = process.env.PCB_MCP_PREVIEW_DIR;
+    delete process.env.PCB_MCP_PREVIEW_DIR;
+    try {
+      const proj = currentProjectPath();
+      expect(proj).not.toBeNull();
+      savePreview(
+        { source: "pcb_2d", dataUrl: PIXEL_1X1, width: 1, height: 1 },
+        projectPreviewsDir(proj!),
+      );
+      const out = await callPreview({ source: "pcb_2d" });
+      expect(out.found).toBe(true);
+      expect(out.dataUrl).toBe(PIXEL_1X1);
+      expect(out.previewUrl?.startsWith("file://")).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env.PCB_MCP_PREVIEW_DIR;
+      else process.env.PCB_MCP_PREVIEW_DIR = saved;
+    }
   });
 });

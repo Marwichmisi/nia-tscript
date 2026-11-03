@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { emptyStats } from "./board.js";
+import { boardExpectsRouting, boardRoutingDisabled, emptyStats, isBoardRouted, ROUTE_EFFORTS } from "./board.js";
 import { runDomainChecks, runPlacementGate, type CheckDomain } from "./checks.js";
 import { compileTsx } from "./compile.js";
 import { applyBatch, BATCH_MAX_OPS, type BatchOp } from "./batch.js";
@@ -39,18 +39,21 @@ import {
 } from "./state.js";
 import {
   NO_PROJECT_OPEN,
+  OUT_OF_SCOPE,
+  assertProjectMember,
+  canonicalProjectPath,
   currentProjectPath,
+  ensureCircuitFile,
   ensureProjectLayout,
   listProjects,
   loadRegistry,
   persistProjectFiles,
   projectCircuitPath,
-  projectExportsDir,
+  projectExportDir,
   projectMainPath,
   projectPreviewsDir,
   saveRegistry,
   upsertRegistry,
-  validateProjectPath,
   writeLockProjectPath,
 } from "./project.js";
 
@@ -97,6 +100,7 @@ const ProjectListOutput = z.object({
     z.object({
       path: z.string(),
       name: z.string(),
+      parent: z.string().describe("Dossier parent complet (homonymes distingués)"),
       exists: z.boolean(),
       lastOpened: z.string(),
     }),
@@ -121,6 +125,33 @@ function noProjectError(code: string): { message: string; code: string } {
   };
 }
 
+/** Confinement (ticket #42) : le Projet courant (lockfile) doit être
+ *  membre du Registre après canonicalisation. Retourne `null` si le contrôle
+ *  passe, sinon l'erreur explicite hors périmètre (à fusionner dans la
+ *  sortie de refus de l'outil, comme `noProjectError`).
+ *  `null` projet → `null` aussi (l'appelant garde son `NO_PROJECT_OPEN`). */
+function checkConfined(tool: string, proj: string | null): { message: string; code: string } | null {
+  if (!proj) return null;
+  try {
+    assertProjectMember(proj);
+    return null;
+  } catch (e) {
+    return { message: `${(e as Error).message} (${tool})`, code: OUT_OF_SCOPE };
+  }
+}
+
+/** Préambule Confinement mutualisé (revue #37 item 11) : Projet courant +
+ *  contrôle d'appartenance. Les appelants gardent leur `if` (les outils en
+ *  écriture refusent aussi sans Projet, `preview_screenshot` garde son repli
+ *  global) et fusionnent `err` dans leur sortie de refus. */
+function requireConfinedProject(tool: string): {
+  proj: string | null;
+  scopeErr: { message: string; code: string } | null;
+} {
+  const proj = currentProjectPath();
+  return { proj, scopeErr: checkConfined(tool, proj) };
+}
+
 function loadCodeForProject(projectPath: string): void {
   try {
     const code = fs.readFileSync(projectMainPath(projectPath), "utf8");
@@ -130,11 +161,27 @@ function loadCodeForProject(projectPath: string): void {
   }
 }
 
+/** Charge le TSX disque en mémoire au boot sidecar (ticket #43) : le
+ *  disque est la source unique de vérité, la mémoire n'est qu'un cache
+ *  invalidé au démarrage. Ne throw jamais (boot best-effort, loggé via
+ *  l'appelant) ; retourne vrai si un Projet est ouvert (rechargé ou déjà
+ *  en phase), faux si Accueil (rien à recharger). */
+export function loadOpenProjectCode(): boolean {
+  const proj = currentProjectPath();
+  if (!proj) return false;
+  loadCodeForProject(proj);
+  return true;
+}
+
 function persistCurrent(projectPath: string, code: string, circuitJson: unknown[]): void {
   try {
     persistProjectFiles(projectPath, code, circuitJson);
-  } catch {
-    // autosave best-effort, la compile reste source de vérité mémoire.
+  } catch (e) {
+    // Écriture non silencieuse (ticket #43) : jamais de `applied:true` sur
+    // disque KO — l'appelant répond `applied:false` avec ce message.
+    throw new Error(
+      `persistance disque impossible (main.tsx) : ${e instanceof Error ? e.message : String(e)}`,
+    );
   }
 }
 
@@ -265,6 +312,10 @@ const PreviewScreenshotInput = z.object({
   source: z
     .string()
     .describe("schematic_2d | pcb_2d | pcb_3d (alias prototype schematique_2d accepté)"),
+  name: z
+    .string()
+    .optional()
+    .describe("Capture nommée (slug a-z0-9-_, max 32, défaut: dernier de la source)"),
   disableCdnLoading: z
     .boolean()
     .optional()
@@ -274,6 +325,7 @@ const PreviewScreenshotInput = z.object({
 const PreviewScreenshotOutput = z.object({
   sessionId: z.string(),
   source: z.string(),
+  name: z.string().nullable(),
   found: z.boolean(),
   dataUrl: z.string().nullable(),
   bytes: z.number(),
@@ -315,6 +367,13 @@ const BatchOpSchema = z.union([
     pin: z.string().min(1).describe("reassign_net : pin visée (ex pin1)"),
     net: z.string().min(1).describe("reassign_net : net cible (ex GND ou net.GND)"),
   }),
+  z.object({
+    kind: z.literal("route"),
+    effort: z
+      .enum(ROUTE_EFFORTS)
+      .optional()
+      .describe("route : effort de l'autorouteur local auto_local (défaut 1x)"),
+  }),
 ]);
 
 const BatchExecuteInput = z.object({
@@ -322,7 +381,7 @@ const BatchExecuteInput = z.object({
   operations: z
     .array(BatchOpSchema)
     .describe(
-      `Lot atomique patch+live (1..${BATCH_MAX_OPS}) : une seule approbation couvre l'itération complète, rollback si un op échoue`,
+      `Lot patch+live+route (1..${BATCH_MAX_OPS}) : une seule approbation couvre l'itération complète, rollback si un op échoue`,
     ),
   disableCdnLoading: z
     .boolean()
@@ -405,7 +464,7 @@ const FabExportInput = z.object({
   project_name: z
     .string()
     .optional()
-    .describe("Nom projet pour les fichiers KiCad (défaut: nia-demo)"),
+    .describe("Nom projet pour les fichiers KiCad (défaut: basename du Projet ouvert)"),
   disableCdnLoading: z
     .boolean()
     .optional()
@@ -502,7 +561,9 @@ export function buildFactory() {
       },
       async ({ path: p, template }) => {
         return enqueue(async () => {
-          const dir = validateProjectPath(p);
+          // Frontière outil : normalisation canonique unique (sans slash,
+          // symlinks résolus si existe) — même règle que le backend Rust.
+          const dir = canonicalProjectPath(p);
           const outcome = ensureProjectLayout(dir, template ?? "vide");
           const reg = loadRegistry();
           const next = upsertRegistry(reg, dir);
@@ -533,11 +594,14 @@ export function buildFactory() {
       },
       async ({ path: p }) => {
         return enqueue(async () => {
-          const dir = validateProjectPath(p);
+          const dir = canonicalProjectPath(p);
           if (!fs.existsSync(dir)) throw new Error("dossier introuvable");
           if (!fs.existsSync(projectMainPath(dir))) {
             throw new Error("dossier sans main.tsx : refuse d'ouvrir");
           }
+          // Disque source de vérité : circuit.json recréé si absent, migré
+          // si legacy, erreur visible si corrompu (ticket #38).
+          ensureCircuitFile(dir);
           const reg = loadRegistry();
           const next = upsertRegistry(reg, dir);
           saveRegistry(next);
@@ -669,9 +733,10 @@ export function buildFactory() {
       async ({ session_id, anchor, replacement, disableCdnLoading }) => {
         return enqueue(async () => {
           const sessionId = session_id ?? "default";
-          const proj = currentProjectPath();
-          if (!proj) {
-            const err = noProjectError("code_patch");
+          // Confinement (#42) : écriture refusée hors Registre.
+          const { proj, scopeErr } = requireConfinedProject("code_patch");
+          if (!proj || scopeErr) {
+            const err = scopeErr ?? noProjectError("code_patch");
             const output = {
               sessionId,
               applied: false as const,
@@ -713,7 +778,6 @@ export function buildFactory() {
               structuredContent: output,
             };
           }
-          setCode(patched.code);
           const compiled = await compileTsx(patched.code, { disableCdnLoading });
           setLastCompile({
             status: compiled.errors === 0 ? "ok" : "error",
@@ -721,13 +785,39 @@ export function buildFactory() {
             warnings: compiled.warnings,
           });
           if (compiled.errors === 0) {
+            try {
+              // `setCode` suit la persistance réussie : sur disque KO la
+              // mémoire reste égale au disque (source de vérité).
+              persistCurrent(proj, patched.code, compiled.circuitJson);
+            } catch (e) {
+              const message = e instanceof Error ? e.message : String(e);
+              appendLog("error", "compile", `code_patch disque KO : ${message}`);
+              const output = {
+                sessionId,
+                applied: false as const,
+                ready: false,
+                stats: compiled.stats,
+                diagnostics: [{ severity: "error", message, source: "code_patch" }],
+                mode: "echec",
+                banner: compiled.banner,
+                errors: 1,
+                warnings: compiled.warnings,
+                circuitJsonLength: 0,
+                circuitJson: [] as unknown[],
+              };
+              return {
+                content: [{ type: "text", text: JSON.stringify(output) }],
+                structuredContent: output,
+              };
+            }
+            setCode(patched.code);
             appendLog(
               "info",
               "compile",
               `code_patch ok : ${compiled.stats.total} éléments, 0 erreur`,
             );
-            persistCurrent(proj, patched.code, compiled.circuitJson);
           } else {
+            setCode(patched.code);
             appendLog(
               "error",
               "compile",
@@ -789,7 +879,10 @@ export function buildFactory() {
         const asked: CheckDomain = domain ?? "all";
         const code = getCode();
         const compiled = await compileTsx(code, { disableCdnLoading });
-        if (compiled.errors !== 0) {
+        // Runner en échec (exception) → pas de circuit-json exploitable.
+        // Les erreurs embarquées (soft) n'empêchent pas le gate (#39 : gate
+        // placement inchangé, évalué sur le circuit-json réel).
+        if (compiled.mode === "echec") {
           const output = {
             sessionId,
             domain: asked,
@@ -834,7 +927,12 @@ export function buildFactory() {
             structuredContent: output,
           };
         }
-        const violations = await runDomainChecks(compiled.circuitJson, asked);
+        let violations = await runDomainChecks(compiled.circuitJson, asked);
+        // Gate dur (#39) : domain=all ne fournit plus de routage quand le
+        // routage est interdit (placement non vert). Gate placement inchangé.
+        if (asked === "all" && !gate.routingAllowed) {
+          violations = violations.filter((v) => v.domain !== "routing");
+        }
         const counts = {
           netlist: violations.filter((v) => v.domain === "netlist").length,
           placement: violations.filter((v) => v.domain === "placement").length,
@@ -856,8 +954,9 @@ export function buildFactory() {
           blockReason: gate.blockReason,
           counts,
           violations,
-          errors: 0,
-          warnings: 0,
+          // Compteurs réels (#39) : erreurs/warnings embarqués du circuit-json.
+          errors: compiled.errors,
+          warnings: compiled.warnings,
         };
         return {
           content: [{ type: "text", text: JSON.stringify(output) }],
@@ -877,9 +976,10 @@ export function buildFactory() {
         annotations: { readOnlyHint: false, destructiveHint: true },
       },
       async ({ session_id, op, refdes, x, y, degrees, footprint, pin, net, disableCdnLoading }) => {
-        const projLive = currentProjectPath();
-        if (!projLive) {
-          const err = noProjectError("live_manage");
+        // Confinement (#42) : lecture/écriture refusées hors Registre.
+        const { proj: projLive, scopeErr: scopeErrLive } = requireConfinedProject("live_manage");
+        if (!projLive || scopeErrLive) {
+          const err = scopeErrLive ?? noProjectError("live_manage");
           const output = {
             sessionId: session_id ?? "default",
             op: (op ?? "").trim(),
@@ -1131,7 +1231,6 @@ export function buildFactory() {
               structuredContent: output,
             };
           }
-          setCode(mutated.code);
           const compiled = await compileTsx(mutated.code, { disableCdnLoading });
           const ready = compiled.errors === 0;
           setLastCompile({
@@ -1140,9 +1239,41 @@ export function buildFactory() {
             warnings: compiled.warnings,
           });
           if (compiled.errors === 0) {
+            try {
+              // `setCode` suit la persistance réussie (cf. code_patch).
+              persistCurrent(projLive, mutated.code, compiled.circuitJson);
+            } catch (e) {
+              const message = e instanceof Error ? e.message : String(e);
+              appendLog("error", "compile", `live_manage disque KO : ${message}`);
+              const output = {
+                sessionId,
+                op: asked,
+                applied: false as const,
+                ready: false,
+                stats: compiled.stats,
+                diagnostics: [{ severity: "error", message, source: "live_manage" }],
+                mode: "echec",
+                banner: compiled.banner,
+                errors: 1,
+                warnings: compiled.warnings,
+                circuitJsonLength: 0,
+                circuitJson: [] as unknown[],
+                code: mutated.code,
+                selection: null,
+                views: null as string[] | null,
+                message,
+              };
+              return {
+                content: [{ type: "text", text: JSON.stringify(output) }],
+                structuredContent: output,
+              };
+            }
+            setCode(mutated.code);
             appendLog("info", "compile", `live_manage ${asked} ok : ${compiled.stats.total} éléments, 0 erreur`);
-            persistCurrent(projLive, mutated.code, compiled.circuitJson);
           } else {
+            // Compile en erreur : mémoire à jour (sonnette pcb_state), disque
+            // inchangé, diagnostics exploitables — comportement inchangé.
+            setCode(mutated.code);
             appendLog(
               "error",
               "compile",
@@ -1185,17 +1316,46 @@ export function buildFactory() {
         outputSchema: PreviewScreenshotOutput,
         annotations: { readOnlyHint: true, destructiveHint: false },
       },
-      async ({ session_id, source, disableCdnLoading }) => {
+      async ({ session_id, source, name, disableCdnLoading }) => {
         const sessionId = session_id ?? "default";
-        const projPrev = currentProjectPath();
-        // Override tests PCB_MCP_PREVIEW_DIR prioritaire (suites historiques), sinon dossier projet.
+        // Confinement (#42) : lecture capture refusée hors Registre
+        // (sans repli vers le cache global — un projet ouvert hors périmètre
+        // ne doit ni lire son dossier ni fuir vers un autre).
+        const { proj: projPrev, scopeErr: scopeErrPrev } = requireConfinedProject("preview_screenshot");
+        if (scopeErrPrev) {
+          const output = {
+            sessionId,
+            source: String(source ?? ""),
+            name: (typeof name === "string" ? name : null) as string | null,
+            found: false,
+            dataUrl: null,
+            bytes: 0,
+            width: null,
+            height: null,
+            previewUrl: null,
+            updatedAt: null,
+            banner: null,
+            message: scopeErrPrev.message,
+            errors: 1,
+            warnings: 0,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify({ ...output, ...scopeErrPrev }) }],
+            structuredContent: output,
+          };
+        }
+        // Priorité <Projet ouvert>/previews/, fallback override tests / cache global.
+        // `PCB_MCP_PREVIEW_DIR` est un hook de TEST (revue #37 item 4) : jamais
+        // posé par le backend prod, non contrôlable via MCP.
         const previewOverride = (process.env.PCB_MCP_PREVIEW_DIR ?? "").trim();
-        const previewDirEff = previewOverride || (projPrev ? projectPreviewsDir(projPrev) : "");
+        const projectDir = projPrev ? projectPreviewsDir(projPrev) : "";
+        const previewDirEff = projectDir || previewOverride;
         if (!previewDirEff) {
           const err = noProjectError("preview_screenshot");
           const output = {
             sessionId,
             source: String(source ?? ""),
+            name: (typeof name === "string" ? name : null) as string | null,
             found: false,
             dataUrl: null,
             bytes: 0,
@@ -1213,7 +1373,10 @@ export function buildFactory() {
             structuredContent: output,
           };
         }
-        const read = readPreview(source ?? "", { dir: previewDirEff, disableCdnLoading });
+        let read = readPreview(source ?? "", { dir: previewDirEff, disableCdnLoading, name });
+        if (!read.found && previewOverride && previewOverride !== previewDirEff) {
+          read = readPreview(source ?? "", { dir: previewOverride, disableCdnLoading, name });
+        }
         if (read.found) {
           appendLog("info", "export", `preview_screenshot ${read.source} ok : ${read.bytes} octets`);
         } else {
@@ -1222,6 +1385,7 @@ export function buildFactory() {
         const output = {
           sessionId,
           source: String(read.source),
+          name: read.name,
           found: read.found,
           dataUrl: read.dataUrl,
           bytes: read.bytes,
@@ -1244,9 +1408,9 @@ export function buildFactory() {
     server.registerTool(
       "batch_execute",
       {
-        title: "Lot atomique + une approbation",
+        title: "Lot + une approbation",
         description:
-          "Applique un lot mixte patch+live en une seule approbation : toutes les ops en mémoire puis une seule compile. Échec (op invalide ou compile en erreur) → rollback complet fichier+live, état inchangé. Une itération = un seul tools/call.",
+          "Applique un lot mixte patch+live+route en une seule approbation : toutes les ops en mémoire puis une seule compile. Op `route` : épingle l'autorouteur local (effort configurable) et exige le gate placement + routage effectif. Échec (op invalide, compile en erreur ou gate route rouge) → rollback complet fichier+live, état inchangé. Une itération = un seul tools/call.",
         inputSchema: BatchExecuteInput,
         outputSchema: BatchExecuteOutput,
         annotations: {
@@ -1259,9 +1423,10 @@ export function buildFactory() {
       async ({ session_id, operations, disableCdnLoading }) => {
         return enqueue(async () => {
           const sessionId = session_id ?? "default";
-          const projBatch = currentProjectPath();
-          if (!projBatch) {
-            const err = noProjectError("batch_execute");
+          // Confinement (#42) : lot refusé hors Registre.
+          const { proj: projBatch, scopeErr: scopeErrBatch } = requireConfinedProject("batch_execute");
+          if (!projBatch || scopeErrBatch) {
+            const err = scopeErrBatch ?? noProjectError("batch_execute");
             const output = {
               sessionId,
               applied: false as const,
@@ -1378,13 +1543,83 @@ export function buildFactory() {
               structuredContent: output,
             };
           }
+          // Gate route (#44) : si le lot contient une op `route`, la compile
+          // verte ne suffit pas — le placement doit être vert (sinon le
+          // moteur ignore l'autoroutage) et le circuit-json doit être
+          // effectivement routé. Sinon rollback, état inchangé.
+          if (ops.some((o) => o.kind === "route")) {
+            const gate = await runPlacementGate(compiled.circuitJson, batched.code);
+            const blockReason = !gate.routingAllowed
+              ? (gate.blockReason ?? "placement non vert")
+              : !isBoardRouted(compiled.circuitJson)
+                ? "board non routé : aucune pcb_trace avec route dans le circuit-json — vérifiez le placement puis relancez"
+                : null;
+            if (blockReason) {
+              restoreStore(snap);
+              const ready = getBoardState(sessionId).ready;
+              const output = {
+                sessionId,
+                applied: false as const,
+                ready,
+                failedOpIndex: null as number | null,
+                rolledBack: true,
+                stats: emptyStats(),
+                diagnostics: [
+                  { severity: "error", message: `routing refusé : ${blockReason}`, source: "batch_execute" },
+                ],
+                mode: "echec",
+                banner: compiled.banner,
+                errors: 1,
+                warnings: compiled.warnings,
+                circuitJsonLength: 0,
+                circuitJson: [] as unknown[],
+                code: snap.code,
+              };
+              appendLog(
+                "error",
+                "compile",
+                `batch_execute rollback : routing refusé — ${blockReason}`,
+              );
+              return {
+                content: [{ type: "text", text: JSON.stringify(output) }],
+                structuredContent: output,
+              };
+            }
+          }
           setLastCompile({ status: "ok", errors: 0, warnings: compiled.warnings });
           appendLog(
             "info",
             "compile",
             `batch_execute ok : ${ops.length} ops, ${compiled.stats.total} éléments, 0 erreur`,
           );
-          persistCurrent(projBatch, batched.code, compiled.circuitJson);
+          try {
+            persistCurrent(projBatch, batched.code, compiled.circuitJson);
+          } catch (e) {
+            const message = e instanceof Error ? e.message : String(e);
+            appendLog("error", "compile", `batch_execute disque KO : ${message}`);
+            restoreStore(snap);
+            const ready = getBoardState(sessionId).ready;
+            const output = {
+              sessionId,
+              applied: false as const,
+              ready,
+              failedOpIndex: null as number | null,
+              rolledBack: true,
+              stats: compiled.stats,
+              diagnostics: [{ severity: "error", message, source: "batch_execute" }],
+              mode: "echec",
+              banner: compiled.banner,
+              errors: 1,
+              warnings: compiled.warnings,
+              circuitJsonLength: 0,
+              circuitJson: [] as unknown[],
+              code: snap.code,
+            };
+            return {
+              content: [{ type: "text", text: JSON.stringify(output) }],
+              structuredContent: output,
+            };
+          }
           const output = {
             sessionId,
             applied: true as const,
@@ -1425,8 +1660,11 @@ export function buildFactory() {
         },
       },
       async ({ session_id, query, source, limit, disableCdnLoading }) => {
-        if (!currentProjectPath()) {
-          const err = noProjectError("search_parts");
+        // Confinement (#42, revue #37 item 3) : comme les 5 autres outils,
+        // search_parts exige un Projet membre du Registre.
+        const { proj: projSp, scopeErr: scopeErrSp } = requireConfinedProject("search_parts");
+        if (!projSp || scopeErrSp) {
+          const err = scopeErrSp ?? noProjectError("search_parts");
           const output = {
             sessionId: session_id ?? "default",
             query: (query ?? "").trim(),
@@ -1524,9 +1762,10 @@ export function buildFactory() {
         },
       },
       async ({ session_id, project_name, disableCdnLoading }) => {
-        const projFab = currentProjectPath();
-        if (!projFab) {
-          const err = noProjectError("fab_export");
+        // Confinement (#42) : export refusé hors Registre.
+        const { proj: projFab, scopeErr: scopeErrFab } = requireConfinedProject("fab_export");
+        if (!projFab || scopeErrFab) {
+          const err = scopeErrFab ?? noProjectError("fab_export");
           const output = {
             sessionId: session_id ?? "default",
             ready: false as const,
@@ -1554,7 +1793,30 @@ export function buildFactory() {
         const sessionId = session_id ?? "default";
         const code = getCode();
         const compiled = await compileTsx(code, { disableCdnLoading });
-        if (compiled.errors !== 0) {
+        // Sortie vide partagée des 3 gates de refus (revue #37 item 11) : les
+        // CONDITIONS des gates (#39/#44) sont inchangées, seule la
+        // construction de la sortie est factorisée en closure nommée.
+        const emptyFabOutput = (message: string) => ({
+          sessionId,
+          ready: false as const,
+          mode: "refuse" as const,
+          banner: compiled.banner,
+          errors: 1,
+          warnings: 0,
+          counts: { gerberFiles: 0, bomRows: 0, pnpRows: 0 },
+          gerberNames: [],
+          gerberPreview: "",
+          bomCsv: "",
+          pnpCsv: "",
+          kicad: { pcbBytes: 0, schBytes: 0, proBytes: 0, pcbPreview: "" },
+          kicadZip: { bytes: 0, previewUrl: "" },
+          fabZip: { bytes: 0, previewUrl: "" },
+          artifacts: [],
+          exportDir: "",
+          message,
+        });
+        // Runner en échec (exception) → aucun circuit-json : pas de gate.
+        if (compiled.mode === "echec") {
           appendLog(
             "error",
             "export",
@@ -1584,9 +1846,92 @@ export function buildFactory() {
             structuredContent: output,
           };
         }
+        // Gate board routé (#44) : le routage déclaré interdit
+        // (`routingDisabled`) est refusé avec un message explicite avant le
+        // gate DRC (dont le décompte générique masquerait la cause).
+        // L'export sort d'un board routé par l'autorouteur local.
+        if (boardRoutingDisabled(code)) {
+          const reason =
+            "routingDisabled déclaré sur <board> — retirez-le via code_patch et routez (batch_execute route) avant tout export";
+          appendLog("error", "export", `fab_export refusé : board non routé — ${reason}`);
+          const output = emptyFabOutput(`board non routé : ${reason}`);
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        }
+        // Gate DRC obligatoire avant export (#39) : placement vert exigé et
+        // zéro violation tous domaines (routing exclu si interdit, comme run_checks).
+        const gate = await runPlacementGate(compiled.circuitJson, code);
+        const allViolations = await runDomainChecks(compiled.circuitJson, "all");
+        const drcViolations = gate.routingAllowed
+          ? allViolations
+          : allViolations.filter((v) => v.domain !== "routing");
+        if (!gate.placementGreen || drcViolations.length > 0) {
+          const reason =
+            gate.blockReason ?? `${drcViolations.length} violation(s) DRC à corriger`;
+          setDrcViolations(drcViolations.length);
+          appendLog("error", "export", `fab_export refusé : DRC rouge — ${reason}`);
+          const output = emptyFabOutput(
+            `DRC rouge : ${reason} — corrigez via code_patch/run_checks avant tout export`,
+          );
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        }
+        setDrcViolations(0);
+        // Preuve de routage effectif (#44, résiduel après gate DRC) : des
+        // `<trace>` déclarées mais aucune `pcb_trace` routée (autoroutage
+        // ignoré) → export refusé, jamais de gerbers sans cuivre.
+        if (boardExpectsRouting(code) && !isBoardRouted(compiled.circuitJson)) {
+          const reason =
+            "aucune trace routée dans le circuit-json — routez via batch_execute (op route) avant tout export";
+          appendLog("error", "export", `fab_export refusé : board non routé — ${reason}`);
+          const output = emptyFabOutput(`board non routé : ${reason}`);
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        }
+        // Erreurs embarquées résiduelles (gate vert, checks verts, mais
+        // circuit-json en erreur : ex empreinte invalide) → export refusé
+        // comme une compile en erreur, jamais de gerbers inventés.
+        if (compiled.errors > 0) {
+          appendLog(
+            "error",
+            "export",
+            `fab_export impossible : compile en erreur — ${compiled.diagnostics.find((d) => d.severity === "error")?.message ?? "inconnu"}`,
+          );
+          const output = {
+            sessionId,
+            ready: false as const,
+            mode: "echec",
+            banner: compiled.banner,
+            errors: compiled.errors,
+            warnings: compiled.warnings,
+            counts: { gerberFiles: 0, bomRows: 0, pnpRows: 0 },
+            gerberNames: [],
+            gerberPreview: "",
+            bomCsv: "",
+            pnpCsv: "",
+            kicad: { pcbBytes: 0, schBytes: 0, proBytes: 0, pcbPreview: "" },
+            kicadZip: { bytes: 0, previewUrl: "" },
+            fabZip: { bytes: 0, previewUrl: "" },
+            artifacts: [],
+            exportDir: "",
+            message: `compile en erreur : ${compiled.diagnostics.find((d) => d.severity === "error")?.message ?? "inconnu"} — corrigez via code_patch avant tout export`,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        }
         const fab = await exportFab(compiled.circuitJson as unknown[], {
+          // `PCB_MCP_EXPORT_DIR` est un hook de TEST (revue #37 item 4) :
+          // jamais posé par le backend prod, non contrôlable via MCP.
           projectName: (process.env.PCB_MCP_EXPORT_DIR ?? "").trim()
-            ? (project_name ?? "nia-demo")
+            ? (project_name ?? path.basename(projFab))
             : path.basename(projFab),
         });
         if (!fab.ok) {
@@ -1616,11 +1961,14 @@ export function buildFactory() {
           };
         }
         const out = fab as FabOk;
-        // Override tests PCB_MCP_EXPORT_DIR prioritaire (suites historiques), sinon <projet>/exports/<basename>.
+        // Override tests PCB_MCP_EXPORT_DIR prioritaire (suites historiques),
+        // sinon <projet>/exports/<basename>-<hash12(canonique)> (homonymes distingués).
+        // `PCB_MCP_EXPORT_DIR` est un hook de TEST (revue #37 item 4) : jamais
+        // posé par le backend prod, non contrôlable via MCP.
         const exportOverride = (process.env.PCB_MCP_EXPORT_DIR ?? "").trim();
         const dir = exportOverride
           ? path.join(exportOverride, sanitizeSegment(sessionId), sanitizeSegment(out.projectName))
-          : path.join(projectExportsDir(projFab), sanitizeSegment(out.projectName));
+          : projectExportDir(canonicalProjectPath(projFab));
         fs.mkdirSync(dir, { recursive: true });
         fs.mkdirSync(path.join(dir, "gerbers"), { recursive: true });
         const artifacts = writeFabArtifacts(out, {

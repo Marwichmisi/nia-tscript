@@ -6,11 +6,13 @@ import { Client } from "@modelcontextprotocol/client";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { startServer } from "../src/http";
 import { resetStoreForTests } from "../src/state";
+import { ensureTestProject, setupIsolatedRegistry, type IsolatedEnv } from "./helpers";
 
 const TOKEN = "test-patch-" + Math.random().toString(36).slice(2);
 let PORT = 0;
 let server: Server;
 let baseUrl = "";
+let env: IsolatedEnv;
 
 function freePort(): Promise<number> {
   return new Promise((resolve) => {
@@ -57,6 +59,7 @@ async function callPatch(args: Record<string, unknown>): Promise<PatchOutput> {
 }
 
 beforeAll(async () => {
+  env = setupIsolatedRegistry("nia-patch-");
   PORT = await freePort();
   server = await startServer({ port: PORT, token: TOKEN });
   baseUrl = `http://127.0.0.1:${PORT}/mcp`;
@@ -64,10 +67,13 @@ beforeAll(async () => {
 
 afterAll(() => {
   server.close();
+  env.restore();
 });
 
 beforeEach(() => {
   resetStoreForTests();
+  // Projet explicite (ticket #38) : sans lui, gating = vrai NO_PROJECT_OPEN.
+  ensureTestProject();
 });
 
 describe("S5 — code_patch diagnostiqué", () => {
@@ -88,7 +94,10 @@ describe("S5 — code_patch diagnostiqué", () => {
     });
     expect(out.applied).toBe(true);
     expect(out.errors).toBe(0);
-    expect(out.diagnostics).toEqual([]);
+    // Warnings embarqués réels (#39) : 7 sur la fixture, sourcés circuit-json.
+    expect(out.warnings).toBe(7);
+    expect(out.diagnostics).toHaveLength(7);
+    expect(out.diagnostics.every((d) => d.source === "circuit-json")).toBe(true);
     expect(out.mode).toBe("worker-blob-local");
     expect(out.banner).toBeNull();
     expect(out.circuitJsonLength).toBeGreaterThan(50);

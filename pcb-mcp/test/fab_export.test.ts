@@ -12,12 +12,15 @@ import { Client } from "@modelcontextprotocol/client";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { startServer } from "../src/http";
 import { resetStoreForTests } from "../src/state";
+import { currentProjectPath, projectExportDir } from "../src/project";
+import { ensureTestProject, setupIsolatedRegistry, type IsolatedEnv } from "./helpers";
 
 const TOKEN = "test-fab-" + Math.random().toString(36).slice(2);
 let PORT = 0;
 let server: Server;
 let baseUrl = "";
 let exportDir = "";
+let env: IsolatedEnv;
 
 function freePort(): Promise<number> {
   return new Promise((resolve) => {
@@ -71,6 +74,7 @@ async function callFab(args: Record<string, unknown>): Promise<FabOutput> {
 }
 
 beforeAll(async () => {
+  env = setupIsolatedRegistry("nia-fab-reg-");
   PORT = await freePort();
   server = await startServer({ port: PORT, token: TOKEN });
   baseUrl = `http://127.0.0.1:${PORT}/mcp`;
@@ -80,12 +84,14 @@ beforeAll(async () => {
 
 afterAll(() => {
   server.close();
+  env.restore();
   delete process.env.PCB_MCP_EXPORT_DIR;
   fs.rmSync(exportDir, { recursive: true, force: true });
 });
 
 beforeEach(() => {
   resetStoreForTests();
+  ensureTestProject();
 });
 
 describe("S9-B MCP — fab_export V1", () => {
@@ -117,9 +123,13 @@ describe("S9-B MCP — fab_export V1", () => {
     expect(bom).toMatch(/U1/);
     const pnp = fs.readFileSync(path.join(out.exportDir, "pick-and-place.csv"), "utf8");
     expect(pnp).toMatch(/R1/);
-    const pcb = fs.readFileSync(path.join(out.exportDir, "nia-demo.kicad_pcb"), "utf8");
+    const pcbFiles = fs.readdirSync(out.exportDir).filter((f) => f.endsWith(".kicad_pcb"));
+    expect(pcbFiles.length).toBe(1);
+    const pcb = fs.readFileSync(path.join(out.exportDir, pcbFiles[0]!), "utf8");
     expect(pcb).toMatch(/\(kicad_pcb/);
-    const sch = fs.readFileSync(path.join(out.exportDir, "nia-demo.kicad_sch"), "utf8");
+    const schFiles = fs.readdirSync(out.exportDir).filter((f) => f.endsWith(".kicad_sch"));
+    expect(schFiles.length).toBe(1);
+    const sch = fs.readFileSync(path.join(out.exportDir, schFiles[0]!), "utf8");
     expect(sch).toMatch(/\(kicad_sch/);
     // Zips ouvrables.
     const JSZip = (await import("jszip")).default;
@@ -149,4 +159,43 @@ describe("S9-B MCP — fab_export V1", () => {
     expect(out.ready).toBe(false);
     expect(out.message).toMatch(/compile en erreur/);
   }, 90000);
+
+  test("#39 — DRC rouge (placement overlap) → fab_export bloqué, aucun fichier", async () => {
+    const { client, transport } = await connect();
+    try {
+      await client.callTool({
+        name: "code_patch",
+        arguments: {
+          anchor: `<resistor name="R2" resistance="10k" footprint="0402" pcbX={-5} pcbY={-4} />`,
+          replacement: `<resistor name="R2" resistance="10k" footprint="0402" pcbX={-5} pcbY={4} />`,
+        },
+      });
+    } finally {
+      await transport.close();
+    }
+    const out = await callFab({});
+    expect(out.ready).toBe(false);
+    expect(out.errors).toBeGreaterThanOrEqual(1);
+    expect(out.message).toMatch(/DRC rouge/);
+    expect(out.exportDir).toBe("");
+    expect(out.artifacts).toEqual([]);
+  }, 120000);
+
+  test("#review-4 — SANS env, l'export tombe DANS le Projet", async () => {
+    const saved = process.env.PCB_MCP_EXPORT_DIR;
+    delete process.env.PCB_MCP_EXPORT_DIR;
+    try {
+      const out = await callFab({});
+      expect(out.errors).toBe(0);
+      expect(out.ready).toBe(true);
+      const proj = currentProjectPath();
+      expect(proj).not.toBeNull();
+      expect(out.exportDir.startsWith(projectExportDir(proj!))).toBe(true);
+      const fcu = fs.readFileSync(path.join(out.exportDir, "gerbers", "F_Cu.gbr"), "utf8");
+      expect(fcu).toMatch(/%TF\.|%FS/);
+    } finally {
+      if (saved === undefined) delete process.env.PCB_MCP_EXPORT_DIR;
+      else process.env.PCB_MCP_EXPORT_DIR = saved;
+    }
+  }, 120000);
 });

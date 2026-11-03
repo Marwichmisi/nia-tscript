@@ -6,17 +6,24 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { createServer as createTcpServer } from "node:net";
 import { request as httpRequest } from "node:http";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/client";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { startServer } from "../src/http";
 import { resetStoreForTests } from "../src/state";
+import { ensureTestProject } from "./helpers";
 import type { Server } from "node:http";
 
 const TOKEN = "test-token-" + Math.random().toString(36).slice(2);
 let PORT = 0;
 let server: Server;
 let baseUrl = "";
+let tmpRoot = "";
+let lockFile = "";
+let regFile = "";
+let savedLock: string | undefined;
+let savedProjectsFile: string | undefined;
 
 function freePort(): Promise<number> {
   return new Promise((resolve) => {
@@ -69,7 +76,16 @@ function authed(extra: Record<string, string> = {}, body = "") {
 }
 
 beforeAll(async () => {
+  tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "nia-server-mcp-"));
+  lockFile = path.join(tmpRoot, "mcp.json");
+  regFile = path.join(tmpRoot, "projects.json");
+  savedLock = process.env.NIATSCIRCUIT_MCP_LOCK;
+  savedProjectsFile = process.env.NIATSCIRCUIT_PROJECTS_FILE;
+  process.env.NIATSCIRCUIT_MCP_LOCK = lockFile;
+  process.env.NIATSCIRCUIT_PROJECTS_FILE = regFile;
   resetStoreForTests();
+  // Projet explicite (ticket #38) : S1 teste le vrai chemin "avec projet".
+  ensureTestProject("nia-mcp-test-proj");
   PORT = await freePort();
   server = await startServer({ port: PORT, token: TOKEN });
   baseUrl = `http://127.0.0.1:${PORT}/mcp`;
@@ -77,6 +93,11 @@ beforeAll(async () => {
 
 afterAll(() => {
   server.close();
+  if (savedLock === undefined) delete process.env.NIATSCIRCUIT_MCP_LOCK;
+  else process.env.NIATSCIRCUIT_MCP_LOCK = savedLock;
+  if (savedProjectsFile === undefined) delete process.env.NIATSCIRCUIT_PROJECTS_FILE;
+  else process.env.NIATSCIRCUIT_PROJECTS_FILE = savedProjectsFile;
+  fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
 describe("S1 — outils et ressources via vrai client MCP", () => {
@@ -108,11 +129,11 @@ describe("S1 — outils et ressources via vrai client MCP", () => {
       const res = await client.callTool({ name: "pcb_state", arguments: {} });
       const text = (res.content as Array<{ type: string; text?: string }>)?.[0]?.text ?? "";
       const parsed = JSON.parse(text);
-      expect(parsed.board).toBe("nia-demo");
+      expect(parsed.board).toBe("nia-mcp-test-proj");
       expect(parsed.ready).toBe(true);
       expect(parsed.protocolVersion).toBe("2026-07-28");
       expect((res as { structuredContent?: Record<string, unknown> }).structuredContent).toMatchObject({
-        board: "nia-demo",
+        board: "nia-mcp-test-proj",
         ready: true,
       });
     } finally {
@@ -151,7 +172,7 @@ describe("S1 — outils et ressources via vrai client MCP", () => {
       const read = await client.readResource({ uri: "pcb://hierarchy" });
       const text = (read.contents[0] as { text?: string })?.text ?? "";
       const parsed = JSON.parse(text);
-      expect(parsed.board).toBe("nia-demo");
+      expect(parsed.board).toBe("nia-mcp-test-proj");
       expect(parsed.modules[0].components.map((c: { refdes: string }) => c.refdes)).toContain("R1");
     } finally {
       await transport.close();

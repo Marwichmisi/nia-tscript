@@ -10,11 +10,13 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { startServer } from "../src/http";
 import { resetStoreForTests, getCode } from "../src/state";
 import { resetQueueForTests } from "../src/queue";
+import { ensureTestProject, setupIsolatedRegistry, type IsolatedEnv } from "./helpers";
 
 const TOKEN = "test-live-" + Math.random().toString(36).slice(2);
 let PORT = 0;
 let server: Server;
 let baseUrl = "";
+let env: IsolatedEnv;
 
 function freePort(): Promise<number> {
   return new Promise((resolve) => {
@@ -67,6 +69,7 @@ async function callLive(args: Record<string, unknown>): Promise<LiveOutput> {
 }
 
 beforeAll(async () => {
+  env = setupIsolatedRegistry("nia-live-");
   PORT = await freePort();
   server = await startServer({ port: PORT, token: TOKEN });
   baseUrl = `http://127.0.0.1:${PORT}/mcp`;
@@ -74,11 +77,13 @@ beforeAll(async () => {
 
 afterAll(() => {
   server.close();
+  env.restore();
 });
 
 beforeEach(() => {
   resetStoreForTests();
   resetQueueForTests();
+  ensureTestProject();
 });
 
 describe("S8-B — live_manage write-through", () => {
@@ -125,8 +130,13 @@ describe("S8-B — live_manage write-through", () => {
     expect(s.errors).toBe(0);
     const n = await callLive({ op: "reassign_net", refdes: "R1", pin: "pin1", net: "GND" });
     expect(n.applied).toBe(true);
-    expect(n.errors).toBe(0);
-    expect(n.ready).toBe(true);
+    // Erreur embarquée réelle (#39) : U1.pin3 n'est plus relié à VCC par une
+    // trace (à router — ticket #44), fini le « 0 erreur » masqué.
+    expect(n.errors).toBeGreaterThanOrEqual(1);
+    expect(n.ready).toBe(false);
+    expect(
+      n.diagnostics.some((d) => d.severity === "error" && /not connected/.test(d.message)),
+    ).toBe(true);
     expect(n.code).toContain("net.GND");
   }, 120000);
 

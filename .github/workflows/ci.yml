@@ -1,0 +1,121 @@
+name: ci
+
+# Ticket #40 — gates de reproductibilité avant tout build (spec #37 → Build).
+# Toolchains épinglées, miroir des fichiers pin racine (test
+# pcb-mcp/test/build-repro.test.ts interdit toute dérive) :
+#   bun 1.3.11 (.bun-version), node 22.23.4 (.nvmrc), rust 1.98.1 (rust-toolchain.toml).
+# Triples : les 3 actuels (décision 6 triples reportée, spec #37 Out of scope).
+# Pas de bun.lock racine : décoratif (cf. ticket #40 — seuls pcb-mcp/bun.lock
+# et src/package-lock.json gouvernent les installs, tous deux --frozen/ci).
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  gates:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install dépendances système (webkit/gtk pour cargo test et build Tauri)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: setup bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.11
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.4
+          cache: npm
+          cache-dependency-path: src/package-lock.json
+
+      - name: install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: pcb-mcp — install gelé
+        working-directory: pcb-mcp
+        run: bun install --frozen-lockfile
+
+      - name: build sidecar hôte (requis par les tests matrice §8.2.1)
+        working-directory: pcb-mcp
+        run: bun scripts/build.mjs
+
+      - name: pcb-mcp — tests
+        working-directory: pcb-mcp
+        env:
+          # Recette impl-39 : sans lock tmp, les suites dépendantes du lock
+          # rapportent NO_PROJECT_OPEN au lieu de tester le vrai pont.
+          NIATSCIRCUIT_MCP_LOCK: ${{ runner.temp }}/nia-test-mcp.json
+        run: bun test
+
+      - name: pcb-mcp — vérification de types
+        # Non bloquant (dette connue #40) : @tscircuit/fanout-solver (transitif)
+        # expose des sources .ts brutes dans ses exports, que tsc contrôle avec
+        # notre config stricte (~480 erreurs tierces, 0 dans src/test/scripts).
+        # Suivi : paquet amont compilé ou alignement #39 → re-bloquer le gate.
+        continue-on-error: true
+        working-directory: pcb-mcp
+        run: bun run typecheck
+
+      - name: pcb-mcp — gate types first-party (bloquant, revue #37)
+        # Échoue sur toute erreur tsc dans src/|scripts/|test/, ignore les
+        # tierces (node_modules, dette #40). Le tsc complet reste informatif.
+        working-directory: pcb-mcp
+        run: bun scripts/check-types.mjs
+
+      - name: sidecar — tests Rust
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: frontend — install gelé + vérification de types
+        working-directory: src
+        run: |
+          npm ci
+          npm run typecheck
+
+  sidecar:
+    needs: gates
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+          - platform: windows-latest
+          - platform: macos-latest # Apple Silicon (arm64), comme la release.
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.11
+
+      - name: install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
+
+      - name: build sidecar pcb-mcp
+        working-directory: pcb-mcp
+        run: |
+          bun install --frozen-lockfile
+          bun scripts/build.mjs
+
+      - name: verify sidecar (taille + permissions)
+        working-directory: pcb-mcp
+        run: bun scripts/verify-sidecar.mjs

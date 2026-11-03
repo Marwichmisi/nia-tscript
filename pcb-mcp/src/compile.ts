@@ -2,6 +2,16 @@
 // Exécuté dans le sidecar Bun via CircuitRunner (même moteur que le WebWorker
 // blob-url du prototype, sans fetch CDN au runtime).
 //
+// Stratégie CDN/offline unique (#39, alignée avec src/src/lib/compile.ts) :
+// offline-first des deux côtés — worker bundlé local, CDN autorisé par
+// défaut ; `disableCdnLoading: true` = strict offline (bandeau explicite) ;
+// aucun repli réseau côté sidecar (le repli inline CDN est réservé au
+// frontend et affiché RÉSEAU REQUIS).
+//
+// Diagnostics (#39) : les erreurs/warnings embarqués du circuit-json sont
+// remontés (source "circuit-json") au lieu du « 0 erreur » hardcodé.
+// Gate de placement inchangé (voir checks.ts).
+//
 // Note prototype respectée (commit 83ab848) : un entrypoint `export default`
 // exige `mainComponentPath` SANS `entrypoint`, sinon
 // « IsolatedCircuit has no children ». On ne passe donc JAMAIS `entrypoint`.
@@ -39,7 +49,52 @@ function failResult(message: string, bannerPrefix: string): CompileResult {
     warnings: 0,
   };
 }
-  "CDN désactivé (disableCdnLoading) : toute pièce/empreinte non bundlée est indisponible hors-ligne.";
+
+function firstNonEmptyString(el: Record<string, unknown>, keys: string[]): string | null {
+  for (const k of keys) {
+    const v = el[k];
+    if (typeof v === "string" && v.trim()) return v;
+  }
+  return null;
+}
+
+/**
+ * Diagnostics embarqués du circuit-json (#39, revue #37 item 1).
+ * Signaux reconnus (indépendants de la version core exacte) :
+ * - `type` exactement "error"/"warning" ou à suffixe "_error"/"_warning"
+ *   (insensible à la casse ; la sous-chaîne nue — ex "error_report" —
+ *   ne compte PAS, sinon faux positifs qui bloquent batch/export) ;
+ * - champ explicite `error_message`/`error` (resp. `warning_message`/`warning`).
+ * Priorité du libellé : champ explicite > `message` > extrait JSON.
+ * Source "circuit-json" (distincte de "compile" et des domaines checks).
+ */
+export function extractEmbeddedDiagnostics(circuitJson: unknown[]): Diagnostic[] {
+  const out: Diagnostic[] = [];
+  for (const raw of circuitJson ?? []) {
+    const el = (raw ?? {}) as Record<string, unknown>;
+    const type = typeof el["type"] === "string" ? (el["type"] as string) : "";
+    const lowered = type.toLowerCase();
+    const isErrorType = /(^|_)error$/.test(lowered);
+    const isWarningType = /(^|_)warning$/.test(lowered);
+    const errorField = firstNonEmptyString(el, ["error_message", "error"]);
+    const warningField = firstNonEmptyString(el, ["warning_message", "warning"]);
+    const messageField = firstNonEmptyString(el, ["message"]);
+    if (isErrorType || errorField !== null) {
+      out.push({
+        severity: "error",
+        message: errorField ?? messageField ?? JSON.stringify(raw).slice(0, 300),
+        source: "circuit-json",
+      });
+    } else if (isWarningType || warningField !== null) {
+      out.push({
+        severity: "warning",
+        message: warningField ?? messageField ?? JSON.stringify(raw).slice(0, 300),
+        source: "circuit-json",
+      });
+    }
+  }
+  return out;
+}
 
 function enrichNoChildrenHint(message: string): string {
   if (
@@ -88,14 +143,19 @@ export async function compileTsx(
     await runner.renderUntilSettled();
     const circuitJson = (await runner.getCircuitJson()) as unknown[];
     const stats = computeStats(circuitJson);
+    // Compteurs réels (#39) : erreurs/warnings embarqués du circuit-json,
+    // jamais « 0 » hardcodé.
+    const diagnostics = extractEmbeddedDiagnostics(circuitJson);
+    const errors = diagnostics.filter((d) => d.severity === "error").length;
+    const warnings = diagnostics.filter((d) => d.severity === "warning").length;
     return {
       circuitJson,
-      diagnostics: [],
+      diagnostics,
       stats,
       mode: disableCdnLoading ? "worker-blob-local-nocdn" : "worker-blob-local",
       banner: disableCdnLoading ? CDN_BANNER : null,
-      errors: 0,
-      warnings: 0,
+      errors,
+      warnings,
     };
   } catch (e) {
     const raw = e instanceof Error ? e.message : String(e);

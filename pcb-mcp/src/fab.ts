@@ -32,7 +32,10 @@ export function sanitizeSegment(s: string): string {
   return t || "default";
 }
 
-/** Dossier d'artefacts fab. Override tests via `PCB_MCP_EXPORT_DIR`. */
+/** Dossier d'artefacts fab. Override tests via `PCB_MCP_EXPORT_DIR`.
+ *  Hook de TEST (revue #37 item 4) : jamais posé par le backend prod, non
+ *  contrôlable via MCP — SANS env, le handler `fab_export` résout dans
+ *  `<projet>/exports/<basename>-<hash12>` (défense en profondeur). */
 export function fabExportBaseDir(): string {
   const override = (process.env.PCB_MCP_EXPORT_DIR ?? "").trim();
   if (override) return override;
@@ -76,7 +79,7 @@ export interface ExportFabOptions {
 
 function sanitizeProjectName(name: string): string {
   const t = sanitizeSegment(name);
-  return t === "default" ? "nia-demo" : t;
+  return t === "default" ? "board" : t;
 }
 
 /** Exports fab V1 depuis un circuit-json déjà compilé. Rien d'inventé. */
@@ -84,7 +87,7 @@ export async function exportFab(
   circuitJson: unknown[],
   opts?: ExportFabOptions,
 ): Promise<FabOk | FabErr> {
-  const projectName = sanitizeProjectName(opts?.projectName ?? "nia-demo");
+  const projectName = sanitizeProjectName(opts?.projectName ?? "board");
   if (!Array.isArray(circuitJson) || circuitJson.length === 0) {
     return { ok: false, message: "circuit-json vide : compilez d'abord via code_patch (aucun fichier fab inventé)" };
   }

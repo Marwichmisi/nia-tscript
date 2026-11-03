@@ -19,7 +19,13 @@ describe("S7-A1 — gate placement sur fixture valide", () => {
 
   test("fixture overlap R1/R2 → placement non vert, routing bloqué, violation positionnée", async () => {
     const compiled = await compileTsx(BOARD_INVALID_PLACEMENT);
-    expect(compiled.errors).toBe(0);
+    // Erreurs embarquées réelles (#39) : overlap + autoroutage intégrés au circuit-json.
+    expect(compiled.errors).toBeGreaterThanOrEqual(1);
+    expect(
+      compiled.diagnostics
+        .filter((d) => d.severity === "error")
+        .every((d) => d.source === "circuit-json"),
+    ).toBe(true);
     const gate = await runPlacementGate(compiled.circuitJson, BOARD_INVALID_PLACEMENT);
     expect(gate.placementGreen).toBe(false);
     expect(gate.routingAllowed).toBe(false);
