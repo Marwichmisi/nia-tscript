@@ -3,6 +3,7 @@ import { SchematicViewer } from "@tscircuit/schematic-viewer";
 import { PCBViewer } from "@tscircuit/pcb-viewer";
 import { CadViewer } from "@tscircuit/3d-viewer";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   Camera,
   PanelBottom,
@@ -22,11 +23,13 @@ import {
   currentProject,
   deleteProject as deleteProj,
   forgetProject as forgetProj,
+  isMainOfProject,
   relinkProject as relinkProj,
   listProjects,
   openProject as openProj,
   projectName,
   readProjectMain,
+  shortHash,
   type ProjectItem,
 } from "./lib/projects";
 import { ViewerErrorBoundary } from "./components/ErrorBoundary";
@@ -57,6 +60,18 @@ const TAB_LABEL: Record<Tab, string> = {
 };
 
 const TERM_TABS: TermTab[] = ["console", "state", "tsx", "shot"];
+
+/** Toast local (ticket #43, inspiration prototype jetable) : `role=status`,
+ *  6 s, max 3. Réservé au resync temps réel (mise à jour agent, échec
+ *  resync, déjà à jour) — le système complet vit au ticket #45. */
+interface Toast {
+  id: number;
+  kind: "ok" | "error" | "info";
+  msg: string;
+}
+
+const TOAST_TTL_MS = 6000;
+const TOAST_MAX = 3;
 
 function initialTab(): Tab {
   const t = new URLSearchParams(window.location.search).get("tab");
@@ -149,6 +164,16 @@ function initialPcbRenderer(): "webgpu" | "canvas" {
 export default function App() {
   const [projectPath, setProjectPath] = useState<string | null>(null);
   const [projectCode, setProjectCode] = useState<string>(BOARD_CODE);
+  // Hash disque connu (relecture conditionnelle, ticket #43) : toute
+  // resync compare l'événement `{ path, hash }` à cette valeur.
+  const [knownHash, setKnownHash] = useState<string | null>(null);
+  const [readError, setReadError] = useState<string | null>(null);
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [reloading, setReloading] = useState(false);
+  const knownHashRef = useRef<string | null>(null);
+  const projectPathRef = useRef<string | null>(null);
+  const toastSeq = useRef(0);
+  const toastTimers = useRef<number[]>([]);
   const [projects, setProjects] = useState<ProjectItem[]>([]);
   const [lastOpened, setLastOpened] = useState<string | null>(null);
   const [projBusy, setProjBusy] = useState(false);
@@ -162,7 +187,6 @@ export default function App() {
   const [mode, setMode] = useState<CompileMode | "compilation…">("compilation…");
   const [banner, setBanner] = useState<string | null>(null);
   const [disableCdn, setDisableCdn] = useState(false);
-  const [nonce, setNonce] = useState(0);
   const [boot, setBoot] = useState<string>("démarrage…");
   const [bridge, setBridge] = useState<string>("");
   const [shot, setShot] = useState<Shot | null>(null);
@@ -182,6 +206,55 @@ export default function App() {
     [],
   );
 
+  // Miroirs ref (handlers d'événements Tauri hors cycle render).
+  useEffect(() => {
+    knownHashRef.current = knownHash;
+  }, [knownHash]);
+  useEffect(() => {
+    projectPathRef.current = projectPath;
+  }, [projectPath]);
+
+  const pushToast = useCallback((kind: Toast["kind"], msg: string) => {
+    toastSeq.current += 1;
+    const id = toastSeq.current;
+    setToasts((t) => [...t.slice(-(TOAST_MAX - 1)), { id, kind, msg }]);
+    const timer = window.setTimeout(() => {
+      setToasts((t) => t.filter((x) => x.id !== id));
+    }, TOAST_TTL_MS);
+    toastTimers.current.push(timer);
+  }, []);
+
+  useEffect(() => {
+    const timers = toastTimers.current;
+    return () => {
+      timers.forEach((t) => window.clearTimeout(t));
+    };
+  }, []);
+
+  /** Relit le disque et resynchronise si le hash a changé (`prevHash` = hash
+   *  connu au moment du déclencheur, contre les rafales). Ne throw jamais :
+   *  l'erreur part au bandeau + toast (jamais silencieuse). */
+  const resyncFromDisk = useCallback(
+    async (label: string, prevHash: string | null) => {
+      const cur = projectPathRef.current;
+      if (!cur) return;
+      try {
+        const main = await readProjectMain(cur);
+        if (prevHash !== null && main.hash === prevHash) return; // déjà à jour
+        setProjectCode(main.code);
+        setKnownHash(main.hash);
+        setReadError(null);
+        pushToast("ok", `${label} — resync ✓ (hash ${shortHash(main.hash)})`);
+        log(`${label} : resync disque (hash ${shortHash(main.hash)})`);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setReadError(msg);
+        pushToast("error", `Échec resync : ${msg}`);
+      }
+    },
+    [log, pushToast],
+  );
+
   const refreshProjects = useCallback(async () => {
     try {
       const cur = await currentProject().catch(() => null);
@@ -193,9 +266,12 @@ export default function App() {
         try {
           const main = await readProjectMain(cur);
           setProjectCode(main.code);
+          setKnownHash(main.hash);
+          setReadError(null);
         } catch (e) {
           // Jamais de Gabarit démo masquant (ticket #38, US5) : erreur visible.
           setProjectCode("");
+          setKnownHash(null);
           setProjError(`lecture Projet impossible : ${e instanceof Error ? e.message : String(e)}`);
         }
       }
@@ -262,9 +338,12 @@ export default function App() {
       try {
         const main = await readProjectMain(opened);
         setProjectCode(main.code);
+        setKnownHash(main.hash);
+        setReadError(null);
       } catch (e) {
         // Jamais de Gabarit démo masquant : erreur visible, éditeur vide.
         setProjectCode("");
+        setKnownHash(null);
         throw new Error(`Projet ouvert mais illisible : ${e instanceof Error ? e.message : String(e)}`);
       }
       await refreshProjects();
@@ -278,8 +357,11 @@ export default function App() {
       try {
         const main = await readProjectMain(created);
         setProjectCode(main.code);
+        setKnownHash(main.hash);
+        setReadError(null);
       } catch (e) {
         setProjectCode("");
+        setKnownHash(null);
         throw new Error(`Projet créé mais illisible : ${e instanceof Error ? e.message : String(e)}`);
       }
       await refreshProjects();
@@ -290,6 +372,8 @@ export default function App() {
     await withProjBusy(async () => {
       await closeProj();
       setProjectPath(null);
+      setKnownHash(null);
+      setReadError(null);
       await refreshProjects();
     }, false);
   }
@@ -308,8 +392,11 @@ export default function App() {
       try {
         const main = await readProjectMain(relinked);
         setProjectCode(main.code);
+        setKnownHash(main.hash);
+        setReadError(null);
       } catch (e) {
         setProjectCode("");
+        setKnownHash(null);
         throw new Error(`Projet relié mais illisible : ${e instanceof Error ? e.message : String(e)}`);
       }
       await refreshProjects();
@@ -345,7 +432,78 @@ export default function App() {
     return () => {
       alive = false;
     };
-  }, [disableCdn, nonce, log, projectPath, projectCode]);
+  }, [disableCdn, log, projectPath, projectCode]);
+
+  useEffect(() => {
+    if (!projectPath) return;
+    let alive = true;
+    let unlisten: (() => void) | null = null;
+    let pollId: number | null = null;
+    // Relecture conditionnelle : seul un hash différent relit le disque.
+    const onMainChanged = (evt: { payload: { path: string; hash: string } }) => {
+      if (!alive) return;
+      const p = evt.payload;
+      if (!p || typeof p.path !== "string" || typeof p.hash !== "string") return;
+      if (!isMainOfProject(p.path, projectPathRef.current ?? "")) return;
+      if (p.hash === knownHashRef.current) return; // déjà à jour
+      void resyncFromDisk("MCP : main.tsx mis à jour", knownHashRef.current);
+    };
+    // Un seul watch côté backend (ré-armé ouverture/création, retiré
+    // fermeture) ; la WebView se réabonne à chaque montage (cleanup).
+    void listen<{ path: string; hash: string }>("project-main-changed", onMainChanged)
+      .then((u) => {
+        if (alive) unlisten = u;
+        else u();
+      })
+      .catch(() => {
+        // Repli dégradé uniquement (hors Tauri / dev navigateur) : polling
+        // long à 15 s, même relecture conditionnelle par hash.
+        if (!alive) return;
+        pollId = window.setInterval(() => {
+          const cur = projectPathRef.current;
+          if (!cur || !alive) return;
+          void readProjectMain(cur)
+            .then((main) => {
+              if (!alive) return;
+              if (main.hash !== knownHashRef.current) {
+                void resyncFromDisk("MCP : main.tsx mis à jour", knownHashRef.current);
+              }
+            })
+            .catch(() => {
+              /* le bandeau + toast du prochain succès/échec parleront */
+            });
+        }, 15000);
+      });
+    return () => {
+      alive = false;
+      if (unlisten) unlisten();
+      if (pollId !== null) window.clearInterval(pollId);
+    };
+  }, [projectPath, resyncFromDisk]);
+
+  /** Recompiler avec relecture disque d'abord (fini le snapshot périmé) :
+   *  hash identique → toast « Déjà à jour », sinon compile le code relu.
+   *  Désactivé pendant la compilation (fini le double-clic en boucle). */
+  async function handleRecompile() {
+    if (!projectPath || compiling || reloading) return;
+    setReloading(true);
+    try {
+      const main = await readProjectMain(projectPath);
+      if (main.hash === knownHashRef.current) {
+        pushToast("info", `Déjà à jour (hash ${shortHash(main.hash)})`);
+        return;
+      }
+      setProjectCode(main.code);
+      setKnownHash(main.hash);
+      setReadError(null);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setReadError(msg);
+      pushToast("error", `Échec resync : ${msg}`);
+    } finally {
+      setReloading(false);
+    }
+  }
 
   useEffect(() => {
     let alive = true;
@@ -522,13 +680,16 @@ export default function App() {
                 <Button
                   variant="ghost"
                   size="icon"
-                  onClick={() => setNonce((n) => n + 1)}
-                  aria-label="Recompiler la carte"
+                  onClick={() => void handleRecompile()}
+                  disabled={compiling || reloading}
+                  aria-label={reloading ? "Relecture du disque en cours" : "Recompiler la carte (relecture disque d'abord)"}
                 >
                   <RotateCw size={15} aria-hidden="true" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>Recompiler</TooltipContent>
+              <TooltipContent>
+                {reloading ? "Relecture disque…" : "Recompiler (relecture disque d'abord)"}
+              </TooltipContent>
             </Tooltip>
             <Button
               variant="default"
@@ -560,7 +721,39 @@ export default function App() {
         </div>
       </header>
 
-      {banner && (
+      {/* Bandeau 4 états (ticket #43, d'après prototype jetable) :
+          vert Prêt / ambre Compilation / rouge Erreur lecture + Réessayer /
+          gris Accueil (= vue Home, sans Projet ouvert). */}
+      {readError ? (
+        <div className="notice notice-error" role="alert">
+          <TriangleAlert size={13} aria-hidden="true" />
+          <span>Erreur lecture main.tsx : {readError}</span>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void resyncFromDisk("Relecture manuelle", knownHashRef.current)}
+          >
+            Réessayer
+          </Button>
+        </div>
+      ) : compiling ? (
+        <div className="notice notice-warn" role="status">
+          <WifiOff size={13} aria-hidden="true" />
+          <span>Compilation… (relecture disque → worker)</span>
+        </div>
+      ) : (
+        <div className="notice notice-ok" role="status">
+          <span className="notice-dot" aria-hidden="true">
+            ●
+          </span>
+          <span>
+            Prêt — Projet ouvert : {projectPath ? projectName(projectPath) : ""} (
+            {projectPath})
+          </span>
+        </div>
+      )}
+
+      {banner && !readError && !compiling && (
         <div
           className={`notice ${mode === "echec" ? "notice-error" : "notice-warn"}`}
           role="status"
@@ -574,7 +767,7 @@ export default function App() {
         </div>
       )}
 
-      <main id="viewer" className="viewer-main" aria-label={`Visualiseur ${TAB_LABEL[tab]}`}>
+      <main id="viewer" className="viewer-main" aria-label={`Visualiseur ${TAB_LABEL[tab]}`} aria-busy={compiling}>
         <div className="viewer-chips" aria-hidden="true">
           <span className="viewer-chip">
             {TAB_LABEL[tab]} · <code translate="no">{KIND[tab]}</code>
@@ -676,6 +869,16 @@ export default function App() {
         source={KIND[tab]}
         onShot={onShot}
       />
+
+      {toasts.length > 0 && (
+        <div className="toasts" aria-live="polite">
+          {toasts.map((t) => (
+            <div key={t.id} role="status" className={`toast toast-${t.kind}`}>
+              {t.msg}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

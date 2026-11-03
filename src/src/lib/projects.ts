@@ -46,11 +46,34 @@ export async function deleteProject(path: string): Promise<void> {
   await invoke("delete_project", { path });
 }
 
-export async function readProjectMain(path?: string): Promise<{ path: string; code: string }> {
-  return (await invoke("read_project_main", { path: path ?? null })) as {
-    path: string;
-    code: string;
-  };
+export interface ProjectMain {
+  path: string;
+  code: string;
+  /** Hash sha256 hex du contenu (relecture conditionnelle, ticket #43). */
+  hash: string;
+}
+
+export async function readProjectMain(path?: string): Promise<ProjectMain> {
+  return (await invoke("read_project_main", { path: path ?? null })) as ProjectMain;
+}
+
+/** Dossier Projet visé par un événement `project-main-changed` (`.../main.tsx`).
+ *  Retourne "" si le chemin ne désigne pas un `main.tsx`. */
+export function eventProjectDir(eventPath: string): string {
+  const norm = eventPath.replace(/\\/g, "/");
+  return norm.endsWith("/main.tsx") ? norm.slice(0, -"/main.tsx".length) : "";
+}
+
+/** Vrai si l'événement vise le `main.tsx` du Projet ouvert. */
+export function isMainOfProject(eventPath: string, projectPath: string): boolean {
+  const dir = eventProjectDir(eventPath);
+  if (!dir) return false;
+  return dir === projectPath.replace(/\\/g, "/");
+}
+
+/** Hash court affichable (8 premiers car., cf. prototype `ab12…`). */
+export function shortHash(hash: string): string {
+  return hash.length > 8 ? hash.slice(0, 8) : hash;
 }
 
 export function projectName(p: string): string {

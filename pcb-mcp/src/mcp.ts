@@ -132,11 +132,27 @@ function loadCodeForProject(projectPath: string): void {
   }
 }
 
+/** Recharge le TSX disque en mémoire au boot sidecar (ticket #43) : le
+ *  disque est la source unique de vérité, la mémoire n'est qu'un cache
+ *  invalidé au démarrage. Ne throw jamais (boot best-effort, loggé via
+ *  l'appelant) ; retourne vrai si un Projet est ouvert (rechargé ou déjà
+ *  en phase), faux si Accueil (rien à recharger). */
+export function reloadOpenProjectFromDisk(): boolean {
+  const proj = currentProjectPath();
+  if (!proj) return false;
+  loadCodeForProject(proj);
+  return true;
+}
+
 function persistCurrent(projectPath: string, code: string, circuitJson: unknown[]): void {
   try {
     persistProjectFiles(projectPath, code, circuitJson);
-  } catch {
-    // autosave best-effort, la compile reste source de vérité mémoire.
+  } catch (e) {
+    // Écriture non silencieuse (ticket #43) : jamais de `applied:true` sur
+    // disque KO — l'appelant répond `applied:false` avec ce message.
+    throw new Error(
+      `persistance disque impossible (main.tsx) : ${e instanceof Error ? e.message : String(e)}`,
+    );
   }
 }
 
@@ -732,7 +748,6 @@ export function buildFactory() {
               structuredContent: output,
             };
           }
-          setCode(patched.code);
           const compiled = await compileTsx(patched.code, { disableCdnLoading });
           setLastCompile({
             status: compiled.errors === 0 ? "ok" : "error",
@@ -740,13 +755,39 @@ export function buildFactory() {
             warnings: compiled.warnings,
           });
           if (compiled.errors === 0) {
+            try {
+              // `setCode` suit la persistance réussie : sur disque KO la
+              // mémoire reste égale au disque (source de vérité).
+              persistCurrent(proj, patched.code, compiled.circuitJson);
+            } catch (e) {
+              const message = e instanceof Error ? e.message : String(e);
+              appendLog("error", "compile", `code_patch disque KO : ${message}`);
+              const output = {
+                sessionId,
+                applied: false as const,
+                ready: false,
+                stats: compiled.stats,
+                diagnostics: [{ severity: "error", message, source: "code_patch" }],
+                mode: "echec",
+                banner: compiled.banner,
+                errors: 1,
+                warnings: compiled.warnings,
+                circuitJsonLength: 0,
+                circuitJson: [] as unknown[],
+              };
+              return {
+                content: [{ type: "text", text: JSON.stringify(output) }],
+                structuredContent: output,
+              };
+            }
+            setCode(patched.code);
             appendLog(
               "info",
               "compile",
               `code_patch ok : ${compiled.stats.total} éléments, 0 erreur`,
             );
-            persistCurrent(proj, patched.code, compiled.circuitJson);
           } else {
+            setCode(patched.code);
             appendLog(
               "error",
               "compile",
@@ -1159,7 +1200,6 @@ export function buildFactory() {
               structuredContent: output,
             };
           }
-          setCode(mutated.code);
           const compiled = await compileTsx(mutated.code, { disableCdnLoading });
           const ready = compiled.errors === 0;
           setLastCompile({
@@ -1168,9 +1208,41 @@ export function buildFactory() {
             warnings: compiled.warnings,
           });
           if (compiled.errors === 0) {
+            try {
+              // `setCode` suit la persistance réussie (cf. code_patch).
+              persistCurrent(projLive, mutated.code, compiled.circuitJson);
+            } catch (e) {
+              const message = e instanceof Error ? e.message : String(e);
+              appendLog("error", "compile", `live_manage disque KO : ${message}`);
+              const output = {
+                sessionId,
+                op: asked,
+                applied: false as const,
+                ready: false,
+                stats: compiled.stats,
+                diagnostics: [{ severity: "error", message, source: "live_manage" }],
+                mode: "echec",
+                banner: compiled.banner,
+                errors: 1,
+                warnings: compiled.warnings,
+                circuitJsonLength: 0,
+                circuitJson: [] as unknown[],
+                code: mutated.code,
+                selection: null,
+                views: null as string[] | null,
+                message,
+              };
+              return {
+                content: [{ type: "text", text: JSON.stringify(output) }],
+                structuredContent: output,
+              };
+            }
+            setCode(mutated.code);
             appendLog("info", "compile", `live_manage ${asked} ok : ${compiled.stats.total} éléments, 0 erreur`);
-            persistCurrent(projLive, mutated.code, compiled.circuitJson);
           } else {
+            // Compile en erreur : mémoire à jour (sonnette pcb_state), disque
+            // inchangé, diagnostics exploitables — comportement inchangé.
+            setCode(mutated.code);
             appendLog(
               "error",
               "compile",
@@ -1461,7 +1533,34 @@ export function buildFactory() {
             "compile",
             `batch_execute ok : ${ops.length} ops, ${compiled.stats.total} éléments, 0 erreur`,
           );
-          persistCurrent(projBatch, batched.code, compiled.circuitJson);
+          try {
+            persistCurrent(projBatch, batched.code, compiled.circuitJson);
+          } catch (e) {
+            const message = e instanceof Error ? e.message : String(e);
+            appendLog("error", "compile", `batch_execute disque KO : ${message}`);
+            restoreStore(snap);
+            const ready = getBoardState(sessionId).ready;
+            const output = {
+              sessionId,
+              applied: false as const,
+              ready,
+              failedOpIndex: null as number | null,
+              rolledBack: true,
+              stats: compiled.stats,
+              diagnostics: [{ severity: "error", message, source: "batch_execute" }],
+              mode: "echec",
+              banner: compiled.banner,
+              errors: 1,
+              warnings: compiled.warnings,
+              circuitJsonLength: 0,
+              circuitJson: [] as unknown[],
+              code: snap.code,
+            };
+            return {
+              content: [{ type: "text", text: JSON.stringify(output) }],
+              structuredContent: output,
+            };
+          }
           const output = {
             sessionId,
             applied: true as const,
