@@ -113,14 +113,57 @@ pub fn build_lock(port: u16, token: String) -> McpLock {
     }
 }
 
-/// Écrit le lockfile (crée les parents), mode 0600 sur Unix.
-pub fn write_lockfile(path: &Path, lock: &McpLock) -> io::Result<()> {
+/// Écriture atomique (tmp + rename + fsync fichier + fsync dossier) : un kill
+/// en pleine écriture laisse l'ancien contenu intact ou le nouveau complet —
+/// jamais un JSON tronqué. Écrivain unique : tout write lockfile/Registre
+/// (`write_lockfile`, `project::save_registry_file`) passe par ici.
+/// (Miroir de `atomicWriteFileSync` côté sidecar.)
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write as _;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let tmp = path.with_extension(format!(
+        "tmp.{}.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+        n
+    ));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    #[cfg(windows)]
+    {
+        // `rename` Windows refuse d'écraser : suppression préalable (fenêtre
+        // de race minimale, le tmp reste isolé en cas de kill).
+        let _ = std::fs::remove_file(path);
+    }
+    let renamed = std::fs::rename(&tmp, path);
+    if renamed.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    renamed?;
+    if let Some(parent) = path.parent() {
+        if let Ok(d) = std::fs::File::open(parent) {
+            let _ = d.sync_all();
+        }
+    }
+    Ok(())
+}
+
+/// Écrit le lockfile (crée les parents), mode 0600 sur Unix.
+/// Atomique (cf. `atomic_write`) : kill en pleine écriture → lock intact.
+pub fn write_lockfile(path: &Path, lock: &McpLock) -> io::Result<()> {
     let json = serde_json::to_string_pretty(lock)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, json)?;
+    atomic_write(path, json.as_bytes())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -552,8 +595,29 @@ mod tests {
     }
 
     #[test]
-    fn read_rejects_invalid() {
-        let dir = std::env::temp_dir().join(format!(
+    fn lockfile_atomique_crash_tmp_cible_intacte() {
+        let dir = std::env::temp_dir().join(format!("nia-boot-crash-{}", std::process::id()));
+        let path = dir.join("niatscircuit/mcp.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        let lock = build_lock(pick_free_port().unwrap(), generate_token());
+        write_lockfile(&path, &lock).expect("lock initial");
+        // Kill simulé en pleine écriture : tmp abandonné, jamais renommé.
+        std::fs::write(path.with_extension("json.999.tmp"), "{tronqué").unwrap();
+        assert_eq!(read_lockfile(&path).expect("lock intact"), lock);
+        let leftovers: Vec<_> = std::fs::read_dir(dir.join("niatscircuit"))
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            // Le tmp simulé est volontaire ; l'écrivain n'en laisse aucun.
+            .filter(|n| n.contains(".tmp.") && !n.contains("999"))
+            .collect();
+        assert!(leftovers.is_empty(), "tmp résiduels : {leftovers:?}");
+        write_lockfile(&path, &lock).expect("réécriture atomique");
+        assert_eq!(read_lockfile(&path).expect("re-lit"), lock);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_rejects_invalid() {        let dir = std::env::temp_dir().join(format!(
             "nia-boot-invalid-{}",
             std::process::id()
         ));

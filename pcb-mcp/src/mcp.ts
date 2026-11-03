@@ -39,18 +39,19 @@ import {
 } from "./state.js";
 import {
   NO_PROJECT_OPEN,
+  canonicalProjectPath,
   currentProjectPath,
+  ensureCircuitFile,
   ensureProjectLayout,
   listProjects,
   loadRegistry,
   persistProjectFiles,
   projectCircuitPath,
-  projectExportsDir,
+  projectExportDir,
   projectMainPath,
   projectPreviewsDir,
   saveRegistry,
   upsertRegistry,
-  validateProjectPath,
   writeLockProjectPath,
 } from "./project.js";
 
@@ -97,6 +98,7 @@ const ProjectListOutput = z.object({
     z.object({
       path: z.string(),
       name: z.string(),
+      parent: z.string().describe("Dossier parent complet (homonymes distingués)"),
       exists: z.boolean(),
       lastOpened: z.string(),
     }),
@@ -507,7 +509,9 @@ export function buildFactory() {
       },
       async ({ path: p, template }) => {
         return enqueue(async () => {
-          const dir = validateProjectPath(p);
+          // Frontière outil : normalisation canonique unique (sans slash,
+          // symlinks résolus si existe) — même règle que le backend Rust.
+          const dir = canonicalProjectPath(p);
           const outcome = ensureProjectLayout(dir, template ?? "vide");
           const reg = loadRegistry();
           const next = upsertRegistry(reg, dir);
@@ -538,11 +542,14 @@ export function buildFactory() {
       },
       async ({ path: p }) => {
         return enqueue(async () => {
-          const dir = validateProjectPath(p);
+          const dir = canonicalProjectPath(p);
           if (!fs.existsSync(dir)) throw new Error("dossier introuvable");
           if (!fs.existsSync(projectMainPath(dir))) {
             throw new Error("dossier sans main.tsx : refuse d'ouvrir");
           }
+          // Disque source de vérité : circuit.json recréé si absent, migré
+          // si legacy, erreur visible si corrompu (ticket #38).
+          ensureCircuitFile(dir);
           const reg = loadRegistry();
           const next = upsertRegistry(reg, dir);
           saveRegistry(next);
@@ -1627,11 +1634,12 @@ export function buildFactory() {
           };
         }
         const out = fab as FabOk;
-        // Override tests PCB_MCP_EXPORT_DIR prioritaire (suites historiques), sinon <projet>/exports/<basename>.
+        // Override tests PCB_MCP_EXPORT_DIR prioritaire (suites historiques),
+        // sinon <projet>/exports/<basename>-<hash12(canonique)> (homonymes distingués).
         const exportOverride = (process.env.PCB_MCP_EXPORT_DIR ?? "").trim();
         const dir = exportOverride
           ? path.join(exportOverride, sanitizeSegment(sessionId), sanitizeSegment(out.projectName))
-          : path.join(projectExportsDir(projFab), sanitizeSegment(out.projectName));
+          : projectExportDir(canonicalProjectPath(projFab));
         fs.mkdirSync(dir, { recursive: true });
         fs.mkdirSync(path.join(dir, "gerbers"), { recursive: true });
         const artifacts = writeFabArtifacts(out, {

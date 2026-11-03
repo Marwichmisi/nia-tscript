@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 export interface ProjectItem {
   path: string;
   name: string;
+  /** Dossier parent complet (homonymes distingués dans l'Accueil). */
+  parent: string;
   exists: boolean;
   lastOpened: string;
 }
@@ -36,6 +38,10 @@ export async function forgetProject(path: string): Promise<void> {
   await invoke("forget_project", { path });
 }
 
+export async function relinkProject(oldPath: string, newPath: string): Promise<string> {
+  return (await invoke("relink_project", { oldPath, newPath })) as string;
+}
+
 export async function deleteProject(path: string): Promise<void> {
   await invoke("delete_project", { path });
 }
@@ -50,4 +56,11 @@ export async function readProjectMain(path?: string): Promise<{ path: string; co
 export function projectName(p: string): string {
   const parts = p.replace(/\\/g, "/").split("/").filter(Boolean);
   return parts[parts.length - 1] ?? p;
+}
+
+/** Nom affichable du dossier parent (homonymes distingués). */
+export function projectParentName(parent: string): string {
+  if (!parent) return "";
+  const parts = parent.replace(/\\/g, "/").split("/").filter(Boolean);
+  return parts[parts.length - 1] ?? parent;
 }
