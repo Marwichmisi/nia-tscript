@@ -53,25 +53,25 @@ pub fn sanitize_preview_name(name: Option<&str>) -> Option<String> {
     let mut slug: String = raw
         .chars()
         .map(|c| {
-            if (c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
                 c
             } else {
                 '-'
             }
         })
         .collect();
-    while (slug.starts_with('-') || slug.starts_with('_')) {
+    while slug.starts_with('-') || slug.starts_with('_') {
         slug.remove(0);
     }
-    while (slug.ends_with('-') || slug.ends_with('_')) {
+    while slug.ends_with('-') || slug.ends_with('_') {
         slug.pop();
     }
     // Collapse `--` → `-` (lisibilité, un seul passage suffit au MVP).
-    while (slug.contains("--")) {
+    while slug.contains("--") {
         slug = slug.replace("--", "-");
     }
     slug.truncate(32);
-    while (slug.ends_with('-') || slug.ends_with('_')) {
+    while slug.ends_with('-') || slug.ends_with('_') {
         slug.pop();
     }
     if slug.is_empty() {
