@@ -40,6 +40,30 @@ describe("#39 — pinning exact commun des deux moteurs", () => {
       expect(frontPkg.dependencies[dep], `${dep} aligné`).toBe(mcpPkg.dependencies[dep]);
     }
   });
+
+  test("revue #37 item 6 : tout @tscircuit/* + convertisseurs épinglé exact, des deux côtés", () => {
+    const mcpPkg = JSON.parse(
+      fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { dependencies: Record<string, string> };
+    const frontPkg = JSON.parse(
+      fs.readFileSync(new URL("../../src/package.json", import.meta.url), "utf8"),
+    ) as { dependencies: Record<string, string> };
+    const inScope = (name: string) =>
+      name.startsWith("@tscircuit/") ||
+      name.startsWith("circuit-json-to-") ||
+      name === "kicad-to-circuit-json" ||
+      name === "jszip";
+    for (const [side, deps] of [
+      ["pcb-mcp", mcpPkg.dependencies],
+      ["src", frontPkg.dependencies],
+    ] as const) {
+      for (const [name, ver] of Object.entries(deps)) {
+        if (!inScope(name)) continue;
+        expect(ver, `${side}:${name} exact`).not.toMatch(/^[\^~]/);
+        expect(ver, `${side}:${name} semver`).toMatch(/^\d+\.\d+\.\d+$/);
+      }
+    }
+  });
 });
 
 describe("#39 — diagnostics embarqués du circuit-json", () => {
