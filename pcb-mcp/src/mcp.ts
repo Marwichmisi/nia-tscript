@@ -1574,7 +1574,8 @@ export function buildFactory() {
         const sessionId = session_id ?? "default";
         const code = getCode();
         const compiled = await compileTsx(code, { disableCdnLoading });
-        if (compiled.errors !== 0) {
+        // Runner en échec (exception) → aucun circuit-json : pas de gate.
+        if (compiled.mode === "echec") {
           appendLog(
             "error",
             "export",
@@ -1641,6 +1642,39 @@ export function buildFactory() {
           };
         }
         setDrcViolations(0);
+        // Erreurs embarquées résiduelles (gate vert, checks verts, mais
+        // circuit-json en erreur : ex empreinte invalide) → export refusé
+        // comme une compile en erreur, jamais de gerbers inventés.
+        if (compiled.errors > 0) {
+          appendLog(
+            "error",
+            "export",
+            `fab_export impossible : compile en erreur — ${compiled.diagnostics.find((d) => d.severity === "error")?.message ?? "inconnu"}`,
+          );
+          const output = {
+            sessionId,
+            ready: false as const,
+            mode: "echec",
+            banner: compiled.banner,
+            errors: compiled.errors,
+            warnings: compiled.warnings,
+            counts: { gerberFiles: 0, bomRows: 0, pnpRows: 0 },
+            gerberNames: [],
+            gerberPreview: "",
+            bomCsv: "",
+            pnpCsv: "",
+            kicad: { pcbBytes: 0, schBytes: 0, proBytes: 0, pcbPreview: "" },
+            kicadZip: { bytes: 0, previewUrl: "" },
+            fabZip: { bytes: 0, previewUrl: "" },
+            artifacts: [],
+            exportDir: "",
+            message: `compile en erreur : ${compiled.diagnostics.find((d) => d.severity === "error")?.message ?? "inconnu"} — corrigez via code_patch avant tout export`,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(output) }],
+            structuredContent: output,
+          };
+        }
         const fab = await exportFab(compiled.circuitJson as unknown[], {
           projectName: (process.env.PCB_MCP_EXPORT_DIR ?? "").trim()
             ? (project_name ?? path.basename(projFab))
