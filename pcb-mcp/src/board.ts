@@ -40,16 +40,28 @@ function boardOpenTag(code: string): string | null {
   return code.match(/<board\b[^>]*>/)?.[0] ?? null;
 }
 
+/**
+ * Commentaires TSX/JS stripés avant les détections par regex (revue #37
+ * item 2) : un `// <trace …` ou `/* routingDisabled *​/` ne doit ni exiger
+ * ni interdire le routage. Sémantique board inchangée (sert uniquement aux
+ * deux prédicats ci-dessous, jamais à la réécriture).
+ */
+export function stripTsxComments(code: string): string {
+  return code
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "");
+}
+
 /** `routingDisabled` déclaré sur le board → routage interdit, export refusé. */
 export function boardRoutingDisabled(tsx: string): boolean {
-  const tag = boardOpenTag(tsx);
+  const tag = boardOpenTag(stripTsxComments(tsx));
   if (!tag) return false;
   return /\broutingDisabled\b/.test(tag);
 }
 
 /** Le TSX déclare des `<trace>` → un routage est attendu à l'export. */
 export function boardExpectsRouting(tsx: string): boolean {
-  return /<trace\b/.test(tsx);
+  return /<trace\b/.test(stripTsxComments(tsx));
 }
 
 export type AutorouterConfigResult = { ok: true; code: string } | { ok: false; message: string };
