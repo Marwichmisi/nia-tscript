@@ -125,8 +125,8 @@ function noProjectError(code: string): { message: string; code: string } {
   };
 }
 
-/** Jail Confinement (ticket #42) : le Projet courant (lockfile) doit être
- *  membre du Registre après canonicalisation. Retourne `null` si le jail
+/** Confinement (ticket #42) : le Projet courant (lockfile) doit être
+ *  membre du Registre après canonicalisation. Retourne `null` si le contrôle
  *  passe, sinon l'erreur explicite hors périmètre (à fusionner dans la
  *  sortie de refus de l'outil, comme `noProjectError`).
  *  `null` projet → `null` aussi (l'appelant garde son `NO_PROJECT_OPEN`). */
@@ -369,7 +369,7 @@ const BatchExecuteInput = z.object({
   operations: z
     .array(BatchOpSchema)
     .describe(
-      `Lot atomique patch+live+route (1..${BATCH_MAX_OPS}) : une seule approbation couvre l'itération complète, rollback si un op échoue`,
+      `Lot patch+live+route (1..${BATCH_MAX_OPS}) : une seule approbation couvre l'itération complète, rollback si un op échoue`,
     ),
   disableCdnLoading: z
     .boolean()
@@ -722,7 +722,7 @@ export function buildFactory() {
         return enqueue(async () => {
           const sessionId = session_id ?? "default";
           const proj = currentProjectPath();
-          // Jail Confinement (#42) : écriture refusée hors Registre.
+          // Confinement (#42) : écriture refusée hors Registre.
           const scopeErr = checkConfined("code_patch", proj);
           if (!proj || scopeErr) {
             const err = scopeErr ?? noProjectError("code_patch");
@@ -966,7 +966,7 @@ export function buildFactory() {
       },
       async ({ session_id, op, refdes, x, y, degrees, footprint, pin, net, disableCdnLoading }) => {
         const projLive = currentProjectPath();
-        // Jail Confinement (#42) : lecture/écriture refusées hors Registre.
+        // Confinement (#42) : lecture/écriture refusées hors Registre.
         const scopeErrLive = checkConfined("live_manage", projLive);
         if (!projLive || scopeErrLive) {
           const err = scopeErrLive ?? noProjectError("live_manage");
@@ -1309,7 +1309,7 @@ export function buildFactory() {
       async ({ session_id, source, name, disableCdnLoading }) => {
         const sessionId = session_id ?? "default";
         const projPrev = currentProjectPath();
-        // Jail Confinement (#42) : lecture capture refusée hors Registre
+        // Confinement (#42) : lecture capture refusée hors Registre
         // (sans repli vers le cache global — un projet ouvert hors périmètre
         // ne doit ni lire son dossier ni fuir vers un autre).
         const scopeErrPrev = checkConfined("preview_screenshot", projPrev);
@@ -1399,7 +1399,7 @@ export function buildFactory() {
     server.registerTool(
       "batch_execute",
       {
-        title: "Lot atomique + une approbation",
+        title: "Lot + une approbation",
         description:
           "Applique un lot mixte patch+live+route en une seule approbation : toutes les ops en mémoire puis une seule compile. Op `route` : épingle l'autorouteur local (effort configurable) et exige le gate placement + routage effectif. Échec (op invalide, compile en erreur ou gate route rouge) → rollback complet fichier+live, état inchangé. Une itération = un seul tools/call.",
         inputSchema: BatchExecuteInput,
@@ -1415,7 +1415,7 @@ export function buildFactory() {
         return enqueue(async () => {
           const sessionId = session_id ?? "default";
           const projBatch = currentProjectPath();
-          // Jail Confinement (#42) : lot atomique refusé hors Registre.
+          // Confinement (#42) : lot atomique refusé hors Registre.
           const scopeErrBatch = checkConfined("batch_execute", projBatch);
           if (!projBatch || scopeErrBatch) {
             const err = scopeErrBatch ?? noProjectError("batch_execute");
@@ -1756,7 +1756,7 @@ export function buildFactory() {
       },
       async ({ session_id, project_name, disableCdnLoading }) => {
         const projFab = currentProjectPath();
-        // Jail Confinement (#42) : export refusé hors Registre.
+        // Confinement (#42) : export refusé hors Registre.
         const scopeErrFab = checkConfined("fab_export", projFab);
         if (!projFab || scopeErrFab) {
           const err = scopeErrFab ?? noProjectError("fab_export");

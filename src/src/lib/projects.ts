@@ -64,7 +64,7 @@ export async function readProjectMain(path?: string): Promise<ProjectMain> {
 }
 
 /** Écrit `main.tsx` du Projet (ticket #45 : coller du TSX, gabarit démo).
- *  Jail Confinement + écriture atomique côté backend ; retourne path/hash
+ *  Confinement + écriture atomique côté backend ; retourne path/hash
  *  relus (le watcher #43 resynchronise le reste). */
 export async function writeProjectMain(path: string, code: string): Promise<ProjectMain> {
   return (await invoke("write_project_main", { path, code })) as ProjectMain;
