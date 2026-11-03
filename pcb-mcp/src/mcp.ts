@@ -140,6 +140,18 @@ function checkConfined(tool: string, proj: string | null): { message: string; co
   }
 }
 
+/** Préambule Confinement mutualisé (revue #37 item 11) : Projet courant +
+ *  contrôle d'appartenance. Les appelants gardent leur `if` (les outils en
+ *  écriture refusent aussi sans Projet, `preview_screenshot` garde son repli
+ *  global) et fusionnent `err` dans leur sortie de refus. */
+function requireConfinedProject(tool: string): {
+  proj: string | null;
+  scopeErr: { message: string; code: string } | null;
+} {
+  const proj = currentProjectPath();
+  return { proj, scopeErr: checkConfined(tool, proj) };
+}
+
 function loadCodeForProject(projectPath: string): void {
   try {
     const code = fs.readFileSync(projectMainPath(projectPath), "utf8");
@@ -149,12 +161,12 @@ function loadCodeForProject(projectPath: string): void {
   }
 }
 
-/** Recharge le TSX disque en mémoire au boot sidecar (ticket #43) : le
+/** Charge le TSX disque en mémoire au boot sidecar (ticket #43) : le
  *  disque est la source unique de vérité, la mémoire n'est qu'un cache
  *  invalidé au démarrage. Ne throw jamais (boot best-effort, loggé via
  *  l'appelant) ; retourne vrai si un Projet est ouvert (rechargé ou déjà
  *  en phase), faux si Accueil (rien à recharger). */
-export function reloadOpenProjectFromDisk(): boolean {
+export function loadOpenProjectCode(): boolean {
   const proj = currentProjectPath();
   if (!proj) return false;
   loadCodeForProject(proj);
@@ -721,9 +733,8 @@ export function buildFactory() {
       async ({ session_id, anchor, replacement, disableCdnLoading }) => {
         return enqueue(async () => {
           const sessionId = session_id ?? "default";
-          const proj = currentProjectPath();
           // Confinement (#42) : écriture refusée hors Registre.
-          const scopeErr = checkConfined("code_patch", proj);
+          const { proj, scopeErr } = requireConfinedProject("code_patch");
           if (!proj || scopeErr) {
             const err = scopeErr ?? noProjectError("code_patch");
             const output = {
@@ -965,9 +976,8 @@ export function buildFactory() {
         annotations: { readOnlyHint: false, destructiveHint: true },
       },
       async ({ session_id, op, refdes, x, y, degrees, footprint, pin, net, disableCdnLoading }) => {
-        const projLive = currentProjectPath();
         // Confinement (#42) : lecture/écriture refusées hors Registre.
-        const scopeErrLive = checkConfined("live_manage", projLive);
+        const { proj: projLive, scopeErr: scopeErrLive } = requireConfinedProject("live_manage");
         if (!projLive || scopeErrLive) {
           const err = scopeErrLive ?? noProjectError("live_manage");
           const output = {
@@ -1308,11 +1318,10 @@ export function buildFactory() {
       },
       async ({ session_id, source, name, disableCdnLoading }) => {
         const sessionId = session_id ?? "default";
-        const projPrev = currentProjectPath();
         // Confinement (#42) : lecture capture refusée hors Registre
         // (sans repli vers le cache global — un projet ouvert hors périmètre
         // ne doit ni lire son dossier ni fuir vers un autre).
-        const scopeErrPrev = checkConfined("preview_screenshot", projPrev);
+        const { proj: projPrev, scopeErr: scopeErrPrev } = requireConfinedProject("preview_screenshot");
         if (scopeErrPrev) {
           const output = {
             sessionId,
@@ -1414,9 +1423,8 @@ export function buildFactory() {
       async ({ session_id, operations, disableCdnLoading }) => {
         return enqueue(async () => {
           const sessionId = session_id ?? "default";
-          const projBatch = currentProjectPath();
-          // Confinement (#42) : lot atomique refusé hors Registre.
-          const scopeErrBatch = checkConfined("batch_execute", projBatch);
+          // Confinement (#42) : lot refusé hors Registre.
+          const { proj: projBatch, scopeErr: scopeErrBatch } = requireConfinedProject("batch_execute");
           if (!projBatch || scopeErrBatch) {
             const err = scopeErrBatch ?? noProjectError("batch_execute");
             const output = {
@@ -1652,10 +1660,9 @@ export function buildFactory() {
         },
       },
       async ({ session_id, query, source, limit, disableCdnLoading }) => {
-        const projSp = currentProjectPath();
         // Confinement (#42, revue #37 item 3) : comme les 5 autres outils,
         // search_parts exige un Projet membre du Registre.
-        const scopeErrSp = checkConfined("search_parts", projSp);
+        const { proj: projSp, scopeErr: scopeErrSp } = requireConfinedProject("search_parts");
         if (!projSp || scopeErrSp) {
           const err = scopeErrSp ?? noProjectError("search_parts");
           const output = {
@@ -1755,9 +1762,8 @@ export function buildFactory() {
         },
       },
       async ({ session_id, project_name, disableCdnLoading }) => {
-        const projFab = currentProjectPath();
         // Confinement (#42) : export refusé hors Registre.
-        const scopeErrFab = checkConfined("fab_export", projFab);
+        const { proj: projFab, scopeErr: scopeErrFab } = requireConfinedProject("fab_export");
         if (!projFab || scopeErrFab) {
           const err = scopeErrFab ?? noProjectError("fab_export");
           const output = {
@@ -1787,6 +1793,28 @@ export function buildFactory() {
         const sessionId = session_id ?? "default";
         const code = getCode();
         const compiled = await compileTsx(code, { disableCdnLoading });
+        // Sortie vide partagée des 3 gates de refus (revue #37 item 11) : les
+        // CONDITIONS des gates (#39/#44) sont inchangées, seule la
+        // construction de la sortie est factorisée en closure nommée.
+        const emptyFabOutput = (message: string) => ({
+          sessionId,
+          ready: false as const,
+          mode: "refuse" as const,
+          banner: compiled.banner,
+          errors: 1,
+          warnings: 0,
+          counts: { gerberFiles: 0, bomRows: 0, pnpRows: 0 },
+          gerberNames: [],
+          gerberPreview: "",
+          bomCsv: "",
+          pnpCsv: "",
+          kicad: { pcbBytes: 0, schBytes: 0, proBytes: 0, pcbPreview: "" },
+          kicadZip: { bytes: 0, previewUrl: "" },
+          fabZip: { bytes: 0, previewUrl: "" },
+          artifacts: [],
+          exportDir: "",
+          message,
+        });
         // Runner en échec (exception) → aucun circuit-json : pas de gate.
         if (compiled.mode === "echec") {
           appendLog(
@@ -1826,25 +1854,7 @@ export function buildFactory() {
           const reason =
             "routingDisabled déclaré sur <board> — retirez-le via code_patch et routez (batch_execute route) avant tout export";
           appendLog("error", "export", `fab_export refusé : board non routé — ${reason}`);
-          const output = {
-            sessionId,
-            ready: false as const,
-            mode: "refuse",
-            banner: compiled.banner,
-            errors: 1,
-            warnings: 0,
-            counts: { gerberFiles: 0, bomRows: 0, pnpRows: 0 },
-            gerberNames: [],
-            gerberPreview: "",
-            bomCsv: "",
-            pnpCsv: "",
-            kicad: { pcbBytes: 0, schBytes: 0, proBytes: 0, pcbPreview: "" },
-            kicadZip: { bytes: 0, previewUrl: "" },
-            fabZip: { bytes: 0, previewUrl: "" },
-            artifacts: [],
-            exportDir: "",
-            message: `board non routé : ${reason}`,
-          };
+          const output = emptyFabOutput(`board non routé : ${reason}`);
           return {
             content: [{ type: "text", text: JSON.stringify(output) }],
             structuredContent: output,
@@ -1862,25 +1872,9 @@ export function buildFactory() {
             gate.blockReason ?? `${drcViolations.length} violation(s) DRC à corriger`;
           setDrcViolations(drcViolations.length);
           appendLog("error", "export", `fab_export refusé : DRC rouge — ${reason}`);
-          const output = {
-            sessionId,
-            ready: false as const,
-            mode: "refuse",
-            banner: compiled.banner,
-            errors: 1,
-            warnings: 0,
-            counts: { gerberFiles: 0, bomRows: 0, pnpRows: 0 },
-            gerberNames: [],
-            gerberPreview: "",
-            bomCsv: "",
-            pnpCsv: "",
-            kicad: { pcbBytes: 0, schBytes: 0, proBytes: 0, pcbPreview: "" },
-            kicadZip: { bytes: 0, previewUrl: "" },
-            fabZip: { bytes: 0, previewUrl: "" },
-            artifacts: [],
-            exportDir: "",
-            message: `DRC rouge : ${reason} — corrigez via code_patch/run_checks avant tout export`,
-          };
+          const output = emptyFabOutput(
+            `DRC rouge : ${reason} — corrigez via code_patch/run_checks avant tout export`,
+          );
           return {
             content: [{ type: "text", text: JSON.stringify(output) }],
             structuredContent: output,
@@ -1894,25 +1888,7 @@ export function buildFactory() {
           const reason =
             "aucune trace routée dans le circuit-json — routez via batch_execute (op route) avant tout export";
           appendLog("error", "export", `fab_export refusé : board non routé — ${reason}`);
-          const output = {
-            sessionId,
-            ready: false as const,
-            mode: "refuse",
-            banner: compiled.banner,
-            errors: 1,
-            warnings: 0,
-            counts: { gerberFiles: 0, bomRows: 0, pnpRows: 0 },
-            gerberNames: [],
-            gerberPreview: "",
-            bomCsv: "",
-            pnpCsv: "",
-            kicad: { pcbBytes: 0, schBytes: 0, proBytes: 0, pcbPreview: "" },
-            kicadZip: { bytes: 0, previewUrl: "" },
-            fabZip: { bytes: 0, previewUrl: "" },
-            artifacts: [],
-            exportDir: "",
-            message: `board non routé : ${reason}`,
-          };
+          const output = emptyFabOutput(`board non routé : ${reason}`);
           return {
             content: [{ type: "text", text: JSON.stringify(output) }],
             structuredContent: output,

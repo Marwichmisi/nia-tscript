@@ -5,7 +5,7 @@
 // Logs sur stderr uniquement (voir log.ts), jamais sur stdout.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { localhostHostValidation, localhostOriginValidation, toNodeHandler } from "@modelcontextprotocol/node";
-import { buildHandler, reloadOpenProjectFromDisk } from "./mcp.js";
+import { buildHandler, loadOpenProjectCode } from "./mcp.js";
 import { logLine } from "./log.js";
 
 export interface StartOptions {
@@ -76,7 +76,7 @@ export async function startServer({ port, token }: StartOptions): Promise<Server
   logLine("info", `écoute sur http://127.0.0.1:${port}/mcp (stateless 2026-07-28 + legacy initialize)`);
   // Disque source de vérité (ticket #43) : au boot, la mémoire est un cache
   // vide — rechargée depuis le main.tsx du Projet ouvert s'il y en a un.
-  if (reloadOpenProjectFromDisk()) {
+  if (loadOpenProjectCode()) {
     logLine("info", "boot : TSX rechargé depuis le disque (projet ouvert)");
   }
   return server;
