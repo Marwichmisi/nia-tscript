@@ -56,6 +56,9 @@ interface TerminalProps {
   onShotNameChange: (n: string) => void;
   source: PreviewSource;
   onShot: () => void;
+  /** Compilation en cours (ticket #45) : les captures sont désactivées, car
+   *  l'image serait obsolète. Distinct de `shotBusy` (libellé inchangé). */
+  compileBusy?: boolean;
 }
 
 const MIN_H = 120;
@@ -82,9 +85,14 @@ function IconBtn({
   );
 }
 
+/** Une ligne de log est-elle une erreur ? Les erreurs sont annoncées en
+ *  alerte (ticket #45), le reste en poli via le conteneur. */
+const LOG_ERROR_RE = /échec|erreur|error|ECHEC|ERREUR|ERROR|KO\b/;
+
 export function Terminal(props: TerminalProps) {
   const logRef = useRef<HTMLOListElement | null>(null);
   const dragRef = useRef<{ startY: number; startH: number } | null>(null);
+  const captureDisabled = props.shotBusy || (props.compileBusy ?? false);
 
   useEffect(() => {
     const el = logRef.current;
@@ -203,10 +211,21 @@ export function Terminal(props: TerminalProps) {
               {props.logs.length === 0 ? (
                 <p className="term-empty">Aucun log — lance une recompile.</p>
               ) : (
-                <ol ref={logRef} className="term-logs" aria-label="Logs de compilation">
-                  {props.logs.map((l, i) => (
-                    <li key={i}>{l}</li>
-                  ))}
+                <ol
+                  ref={logRef}
+                  className="term-logs"
+                  aria-label="Logs de compilation"
+                  aria-live="polite"
+                >
+                  {props.logs.map((l, i) =>
+                    LOG_ERROR_RE.test(l) ? (
+                      <li key={i} role="alert">
+                        {l}
+                      </li>
+                    ) : (
+                      <li key={i}>{l}</li>
+                    ),
+                  )}
                 </ol>
               )}
             </TabsContent>
@@ -327,7 +346,7 @@ export function Terminal(props: TerminalProps) {
                       </p>
                     )}
                     <div className="term-shot-actions">
-                      <Button variant="secondary" size="sm" onClick={props.onShot} disabled={props.shotBusy}>
+                      <Button variant="secondary" size="sm" onClick={props.onShot} disabled={captureDisabled}>
                         <Camera size={13} aria-hidden="true" />
                         {props.shotBusy ? "Capture…" : "Recapturer"}
                       </Button>
@@ -349,10 +368,15 @@ export function Terminal(props: TerminalProps) {
                       vues PCB/3D peuvent afficher « WebGPU rendering failed » : la capture
                       bascule sur SVG/canvas 2D, jamais d'image inventée.
                     </p>
-                    <Button variant="secondary" size="sm" onClick={props.onShot} disabled={props.shotBusy}>
+                    <Button variant="secondary" size="sm" onClick={props.onShot} disabled={captureDisabled}>
                       <Camera size={13} aria-hidden="true" />
                       {props.shotBusy ? "Capture…" : "Capturer l'onglet courant"}
                     </Button>
+                    {props.compileBusy && !props.shotBusy && (
+                      <p className="term-muted" role="status">
+                        Capture désactivée pendant la compilation (image obsolète).
+                      </p>
+                    )}
                   </div>
                 )
               )}

@@ -2,6 +2,9 @@ import { Component, type ReactNode } from "react";
 
 interface Props {
   tabName: string;
+  /** Incrémenté à chaque nouveau circuit-json (ticket #45) : la frontière
+   *  d'erreur repart saine au lieu de figer l'échec précédent. */
+  resetKey: string;
   children: ReactNode;
 }
 
@@ -17,7 +20,7 @@ export class ViewerErrorBoundary extends Component<Props, State> {
   }
 
   componentDidUpdate(prev: Props) {
-    if (prev.tabName !== this.props.tabName && this.state.error) {
+    if (prev.resetKey !== this.props.resetKey && this.state.error) {
       this.setState({ error: null });
     }
   }

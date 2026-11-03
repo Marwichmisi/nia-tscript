@@ -42,8 +42,14 @@ export async function relinkProject(oldPath: string, newPath: string): Promise<s
   return (await invoke("relink_project", { oldPath, newPath })) as string;
 }
 
-export async function deleteProject(path: string): Promise<void> {
-  await invoke("delete_project", { path });
+/** Jeton backend à usage unique exigé par `delete_project` (ticket #42 :
+ *  le dialogue natif seul ne suffit plus). */
+export async function requestDeleteToken(path: string): Promise<string> {
+  return (await invoke("request_delete_token", { path })) as string;
+}
+
+export async function deleteProject(path: string, token?: string): Promise<void> {
+  await invoke("delete_project", { path, token: token ?? null });
 }
 
 export interface ProjectMain {
@@ -55,6 +61,13 @@ export interface ProjectMain {
 
 export async function readProjectMain(path?: string): Promise<ProjectMain> {
   return (await invoke("read_project_main", { path: path ?? null })) as ProjectMain;
+}
+
+/** Écrit `main.tsx` du Projet (ticket #45 : coller du TSX, gabarit démo).
+ *  Jail Confinement + écriture atomique côté backend ; retourne path/hash
+ *  relus (le watcher #43 resynchronise le reste). */
+export async function writeProjectMain(path: string, code: string): Promise<ProjectMain> {
+  return (await invoke("write_project_main", { path, code })) as ProjectMain;
 }
 
 /** Dossier Projet visé par un événement `project-main-changed` (`.../main.tsx`).
