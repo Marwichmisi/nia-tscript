@@ -12,7 +12,7 @@ import { describe, test, expect } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { verifySidecar, MIN_SIDECAR_BYTES } from "../scripts/verify-sidecar.mjs";
+import { verifySidecar, shouldRefuseWorldWritable, MIN_SIDECAR_BYTES } from "../scripts/verify-sidecar.mjs";
 import { PEER_ZOD3_TARGETS, ensurePeerZod3 } from "../scripts/fix-peer-zod.mjs";
 import { filterFirstPartyErrors } from "../scripts/check-types.mjs";
 
@@ -122,6 +122,13 @@ describe("#40 — vérification sidecar (taille + permissions)", () => {
     expect(res.size).toBe(MIN_SIDECAR_BYTES + 1);
     expect(res.worldWritable).toBe(false);
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("garde world-writable : POSIX refuse 0o777, Windows ne refuse jamais (mode émulé 0o666)", () => {
+    expect(shouldRefuseWorldWritable(0o777, "linux")).toBe(true);
+    expect(shouldRefuseWorldWritable(0o755, "linux")).toBe(false);
+    expect(shouldRefuseWorldWritable(0o666, "win32")).toBe(false);
+    expect(shouldRefuseWorldWritable(0o777, "win32")).toBe(false);
   });
 });
 

@@ -24,6 +24,15 @@ export function defaultSidecarPath() {
   return path.join(repoRoot, "src-tauri", "binaries", `pcb-mcp-${triple}${ext}`);
 }
 
+/** Refus world-writable : POSIX uniquement. Sur Windows, Node émule le mode
+ *  (0o666 systématique) sans sémantique POSIX — le refus y serait un faux
+ *  positif permanent ; l'exécutabilité y est portée par les ACL NTFS et le
+ *  bundler Tauri. Le garde taille (anti-stub) reste actif partout. */
+export function shouldRefuseWorldWritable(mode, platform = process.platform) {
+  if (platform === "win32") return false;
+  return (mode & 0o002) !== 0;
+}
+
 /** Vérifie taille + permissions. Retourne { path, size, worldWritable: false }. Lève sinon. */
 export function verifySidecar(target = defaultSidecarPath()) {
   let st;
@@ -37,8 +46,7 @@ export function verifySidecar(target = defaultSidecarPath()) {
       `[verify-sidecar] sidecar stub ou tronqué : ${target} (${st.size} octets < seuil ${MIN_SIDECAR_BYTES})`,
     );
   }
-  const worldWritable = (st.mode & 0o002) !== 0;
-  if (worldWritable) {
+  if (shouldRefuseWorldWritable(st.mode)) {
     throw new Error(`[verify-sidecar] permissions refusées (world-writable) : ${target}`);
   }
   return { path: target, size: st.size, worldWritable: false };
