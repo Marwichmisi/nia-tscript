@@ -4,6 +4,11 @@ name: release
 # and attaches them to the GitHub release matching the app version.
 # Trigger: push a v* tag (e.g. v0.1.2, app version in src-tauri/tauri.conf.json),
 # or manual run (targets the release of the current app version).
+#
+# Ticket #40 — reproductibilité (spec #37 → Build) : toolchains épinglées
+# (bun 1.3.11, node 22.23.4, rust 1.98.1 — miroir des fichiers pin racine),
+# installs gelés, gates tests + types avant build, sidecar vérifié après compilation.
+# Triples : les 3 actuels (décision 6 triples reportée, spec #37 Out of scope).
 
 on:
   push:
@@ -12,7 +17,60 @@ on:
   workflow_dispatch:
 
 jobs:
+  gates:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.11
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.4
+          cache: npm
+          cache-dependency-path: src/package-lock.json
+
+      - name: install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: pcb-mcp — install gelé + build hôte + tests + types
+        # Build hôte requis par les tests matrice §8.2.1 ; typecheck non
+        # bloquant, voir commentaire dans ci.yml (dette #40 : sources .ts
+        # brutes du transitif @tscircuit/fanout-solver).
+        working-directory: pcb-mcp
+        env:
+          # Recette impl-39 : sans lock tmp, les suites dépendantes du lock
+          # rapportent NO_PROJECT_OPEN au lieu de tester le vrai pont.
+          NIATSCIRCUIT_MCP_LOCK: ${{ runner.temp }}/nia-test-mcp.json
+        run: |
+          bun install --frozen-lockfile
+          bun scripts/build.mjs
+          bun test
+          bun run typecheck || echo "::warning::typecheck pcb-mcp non bloquant (dette #40)"
+
+      - name: sidecar — tests Rust
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: frontend — install gelé + vérification de types
+        working-directory: src
+        run: |
+          npm ci
+          npm run typecheck
+
   publish-tauri:
+    needs: gates
     permissions:
       contents: write
     strategy:
@@ -38,17 +96,20 @@ jobs:
 
       - name: setup bun
         uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.11
 
       - name: setup node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.4
           cache: npm
           cache-dependency-path: src/package-lock.json
 
-      - name: install Rust stable
+      - name: install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.98.1
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
 
       - name: Rust cache
@@ -63,8 +124,12 @@ jobs:
       - name: build sidecar pcb-mcp
         working-directory: pcb-mcp
         run: |
-          bun install
+          bun install --frozen-lockfile
           bun scripts/build.mjs
+
+      - name: verify sidecar (taille + permissions)
+        working-directory: pcb-mcp
+        run: bun scripts/verify-sidecar.mjs
 
       - name: build frontend dist
         working-directory: src

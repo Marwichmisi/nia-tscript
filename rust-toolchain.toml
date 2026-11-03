@@ -1,0 +1,6 @@
+# Ticket #40 — toolchain Rust épinglée (spec #37 : fini les flottants CI/local).
+# Canal vérifié le 2026-11-03 : rustc 1.98.1 local + channel static.rust-lang.org 200.
+# La CI (dtolnay/rust-toolchain) et rustup local lisent ce fichier automatiquement.
+[toolchain]
+channel = "1.98.1"
+profile = "minimal"
