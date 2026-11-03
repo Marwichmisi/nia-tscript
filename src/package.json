@@ -33,6 +33,7 @@
     "@tscircuit/matchpack": "^0.0.100",
     "@tscircuit/miniflex": "^0.0.4",
     "@tscircuit/pcb-viewer": "^1.11.441",
+    "manifold-3d": "3.5.1",
     "@tscircuit/props": "0.0.715",
     "@tscircuit/schematic-trace-solver": "^0.0.214",
     "@tscircuit/schematic-viewer": "^2.0.106",

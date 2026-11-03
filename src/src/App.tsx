@@ -14,6 +14,7 @@ import { BOARD_CODE } from "./lib/board";
 import { computeStats } from "./lib/board";
 import { compileBoard, type CompileMode } from "./lib/compile";
 import { captureScreenshot, type PreviewSource } from "./lib/screenshot";
+import { preloadManifold } from "./lib/manifold";
 import { Home } from "./components/Home";
 import {
   closeProject as closeProj,
@@ -123,6 +124,27 @@ function useCopyFeedback(): { copied: boolean; copy: (text: string) => void } {
   return { copied, copy };
 }
 
+/** Rendu PCB adaptatif 0.1.3 (sans dette) : WebGPU si dispo, sinon canvas 2D upstream.
+ *  WebKitGTK Linux n'a pas `navigator.gpu` même avec GPU physique. */
+function initialPcbRenderer(): "webgpu" | "canvas" {
+  try {
+    const stored = window.localStorage.getItem("pcb_viewer_rendering_engine");
+    if (stored && JSON.parse(stored) === "canvas") return "canvas";
+    if (stored && JSON.parse(stored) === "webgpu") {
+      if (typeof navigator !== "undefined" && (navigator as unknown as { gpu?: unknown }).gpu) {
+        return "webgpu";
+      }
+      return "canvas";
+    }
+  } catch {
+    /* ignore */
+  }
+  if (typeof navigator !== "undefined" && (navigator as unknown as { gpu?: unknown }).gpu) {
+    return "webgpu";
+  }
+  return "canvas";
+}
+
 export default function App() {
   const [projectPath, setProjectPath] = useState<string | null>(null);
   const [projectCode, setProjectCode] = useState<string>(BOARD_CODE);
@@ -145,6 +167,7 @@ export default function App() {
   const [shot, setShot] = useState<Shot | null>(null);
   const [shotErr, setShotErr] = useState<string | null>(null);
   const [shotBusy, setShotBusy] = useState(false);
+  const [pcbRenderer, setPcbRenderer] = useState<"webgpu" | "canvas">(() => initialPcbRenderer());
   const tsxCopy = useCopyFeedback();
   const bridgeCopy = useCopyFeedback();
   const viewRef = useRef<HTMLDivElement | null>(null);
@@ -178,6 +201,29 @@ export default function App() {
   useEffect(() => {
     void refreshProjects();
   }, [refreshProjects]);
+
+  // Manifold local pré-chargé une fois (offline-first, évite l'import jsdelivr).
+  useEffect(() => {
+    let alive = true;
+    void preloadManifold()
+      .then(() => {
+        if (alive) log("manifold local pré-chargé (offline-first)");
+      })
+      .catch((e: unknown) => {
+        if (alive) log(`manifold local ÉCHEC : ${e instanceof Error ? e.message : String(e)}`);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [log]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("pcb_viewer_rendering_engine", JSON.stringify(pcbRenderer));
+    } catch {
+      /* ignore */
+    }
+  }, [pcbRenderer]);
 
   async function withProjBusy<T>(fn: () => Promise<T>, withError = true): Promise<T | void> {
     setProjBusy(true);
@@ -488,6 +534,19 @@ export default function App() {
             {TAB_LABEL[tab]} · <code translate="no">{KIND[tab]}</code>
           </span>
           <span className="viewer-chip">{stats.total} éléments</span>
+          {tab === "pcb" && (
+            <button
+              type="button"
+              className="viewer-chip"
+              title="Moteur PCB : canvas = sans GPU, webgpu = expérimental"
+              onClick={() =>
+                setPcbRenderer((r) => (r === "canvas" ? "webgpu" : "canvas"))
+              }
+              aria-hidden="false"
+            >
+              PCB: {pcbRenderer}
+            </button>
+          )}
         </div>
         <div ref={viewRef} className="viewer-body">
           {circuitJson.length === 0 ? (
@@ -504,6 +563,7 @@ export default function App() {
                   <PCBViewer
                     circuitJson={circuitJson as never}
                     height={viewerHeight > 0 ? viewerHeight : undefined}
+                    renderer={pcbRenderer}
                   />
                 ) : (
                 <CadViewer circuitJson={circuitJson as never} />

@@ -18,12 +18,12 @@
     ],
     "security": {
       "csp": {
-        "default-src": "'self'",
-        "script-src": "'self' 'wasm-unsafe-eval' 'unsafe-eval'",
-        "worker-src": "'self' blob:",
+        "default-src": "'self' asset:",
+        "script-src": "'self' asset: blob: 'wasm-unsafe-eval' 'unsafe-eval'",
+        "worker-src": "'self' asset: blob:",
         "img-src": "'self' asset: http://asset.localhost blob: data:",
         "style-src": "'self' 'unsafe-inline'",
-        "connect-src": "ipc: http://ipc.localhost",
+        "connect-src": "ipc: http://ipc.localhost asset: blob: data:",
         "font-src": "'self' data:"
       }
     }

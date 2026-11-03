@@ -31,3 +31,19 @@ _Avoid_: projet manquant, projet invalide
 **Lot**:
 Une liste atomique d'opérations patch+live appliquée en une seule compile avec rollback.
 _Avoid_: batch, transaction, lot atomique
+
+**Sans GPU**:
+L'absence de `navigator.gpu` utilisable, incluant WebKitGTK Linux sans WebGPU même avec GPU physique.
+_Avoid_: pas de carte graphique, PC faible, sans accélération
+
+**Rendu PCB**:
+L'onglet PCB 2D affichant pastilles et traces depuis le circuit-json.
+_Avoid_: viewer PCB, PCB viewer, aperçu PCB
+
+**Review 3D**:
+L'onglet 3D `CadViewer` affichant le volume carte + composants via three.js.
+_Avoid_: vue 3D, 3D viewer, preview 3D
+
+**Manifold**:
+Le module WASM de géométrie booléenne chargé par la Review 3D pour construire le board.
+_Avoid_: manifold-3d, moteur 3D, WASM 3D
