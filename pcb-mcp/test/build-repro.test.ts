@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { verifySidecar, MIN_SIDECAR_BYTES } from "../scripts/verify-sidecar.mjs";
 import { PEER_ZOD3_TARGETS, ensurePeerZod3 } from "../scripts/fix-peer-zod.mjs";
+import { filterFirstPartyErrors } from "../scripts/check-types.mjs";
 
 const repoRoot = path.resolve(import.meta.dir, "..", "..");
 const read = (rel: string) => fs.readFileSync(path.join(repoRoot, rel), "utf8");
@@ -207,5 +208,43 @@ describe("#40 — pairs tscircuit à peer zod 3 résolvent zod 3 (fix-peer-zod)"
     const second = ensurePeerZod3(nm);
     expect(second.fixed).toEqual([]);
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("#review-5 — gate types first-party (bloquant, dette tierce ignorée)", () => {
+  test("filtre : first-party remontées, tierces (node_modules) ignorées", () => {
+    const out = [
+      "src/board.ts(44,10): error TS2322: Type 'x' is not assignable.",
+      "scripts/check-types.mjs(1,1): error TS1005: ';' expected.",
+      "test/board.test.ts(3,7): error TS2304: Cannot find name.",
+      "node_modules/@tscircuit/fanout-solver/lib/a.ts(9,1): error TS2304: Cannot find.",
+      "../../autre/pcb-mcp/node_modules/foo/index.d.ts(2,3): error TS2304: x",
+      "Found 5 errors.",
+    ].join("\n");
+    const { firstParty, thirdParty } = filterFirstPartyErrors(out);
+    expect(firstParty.length).toBe(3);
+    expect(firstParty[0]).toContain("src/board.ts");
+    expect(thirdParty).toBe(2);
+  });
+
+  test("sortie saine → zéro first-party, zéro tierce", () => {
+    expect(filterFirstPartyErrors("")).toMatchObject({ firstParty: [], thirdParty: 0 });
+  });
+
+  test("ci.yml + release.yml : gate first-party câblé et bloquant", () => {
+    for (const wf of ["ci.yml", "release.yml"]) {
+      const yaml = read(`.github/workflows/${wf}`);
+      expect(yaml).toContain("check-types.mjs");
+    }
+    // Bloquant : aucun continue-on-error dans le step du gate.
+    for (const wf of ["ci.yml", "release.yml"]) {
+      const yaml = read(`.github/workflows/${wf}`);
+      const idx = yaml.indexOf("check-types.mjs");
+      const stepStart = yaml.lastIndexOf("- name:", idx);
+      const next = yaml.indexOf("- name:", idx);
+      const step = yaml.slice(stepStart, next === -1 ? undefined : next);
+      expect(step).toContain("check-types.mjs");
+      expect(step).not.toContain("continue-on-error");
+    }
   });
 });

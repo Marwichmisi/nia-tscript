@@ -65,6 +65,12 @@ jobs:
         working-directory: pcb-mcp
         run: bun run typecheck
 
+      - name: pcb-mcp — gate types first-party (bloquant, revue #37)
+        # Échoue sur toute erreur tsc dans src/|scripts/|test/, ignore les
+        # tierces (node_modules, dette #40). Le tsc complet reste informatif.
+        working-directory: pcb-mcp
+        run: bun scripts/check-types.mjs
+
       - name: sidecar — tests Rust
         working-directory: src-tauri
         run: cargo test --locked
