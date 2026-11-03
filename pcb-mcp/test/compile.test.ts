@@ -7,10 +7,17 @@ import { compileTsx } from "../src/compile";
 import { BOARD_CODE, computeStats } from "../src/board";
 
 describe("S6 — compileTsx offline-first", () => {
-  test("fixture valide → circuit-json + 0 erreur", async () => {
+  test("fixture valide → circuit-json + warnings embarqués réels", async () => {
     const res = await compileTsx(BOARD_CODE);
     expect(res.errors).toBe(0);
-    expect(res.diagnostics).toEqual([]);
+    // Warnings embarqués réels du core (#39, jamais « 0 » hardcodé) : 7 sur
+    // la fixture (sonde indépendante : traces sans nom, pins U1
+    // sous-spécifiées…), tous sourcés circuit-json.
+    expect(res.warnings).toBe(7);
+    expect(res.diagnostics).toHaveLength(7);
+    expect(res.diagnostics.every((d) => d.source === "circuit-json")).toBe(true);
+    expect(res.diagnostics.every((d) => d.severity === "warning")).toBe(true);
+    expect(res.diagnostics.some((d) => d.message.includes("is missing a name"))).toBe(true);
     expect(res.mode).toBe("worker-blob-local");
     expect(res.banner).toBeNull();
     expect(res.circuitJson.length).toBeGreaterThan(50);
@@ -37,6 +44,16 @@ describe("S6 — compileTsx offline-first", () => {
     expect(res.diagnostics.length).toBeGreaterThan(0);
     expect(res.diagnostics[0]!.message.length).toBeGreaterThan(10);
     expect(res.banner).toMatch(/Échec compilation/);
+  }, 60000);
+
+  test("#39 — empreinte inconnue → erreurs embarquées réelles, pas 0", async () => {
+    const res = await compileTsx(BOARD_CODE.replace('footprint="0402"', 'footprint="introuvable_xyz"'));
+    expect(res.mode).toBe("worker-blob-local");
+    expect(res.errors).toBeGreaterThanOrEqual(1);
+    expect(
+      res.diagnostics.some((d) => d.severity === "error" && d.source === "circuit-json"),
+    ).toBe(true);
+    expect(res.diagnostics.some((d) => d.message.includes("Invalid footprint"))).toBe(true);
   }, 60000);
 
   test("note prototype : entrypoint + export default → erreur mainComponentPath", async () => {

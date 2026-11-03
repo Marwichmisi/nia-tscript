@@ -88,7 +88,10 @@ describe("S5 — code_patch diagnostiqué", () => {
     });
     expect(out.applied).toBe(true);
     expect(out.errors).toBe(0);
-    expect(out.diagnostics).toEqual([]);
+    // Warnings embarqués réels (#39) : 7 sur la fixture, sourcés circuit-json.
+    expect(out.warnings).toBe(7);
+    expect(out.diagnostics).toHaveLength(7);
+    expect(out.diagnostics.every((d) => d.source === "circuit-json")).toBe(true);
     expect(out.mode).toBe("worker-blob-local");
     expect(out.banner).toBeNull();
     expect(out.circuitJsonLength).toBeGreaterThan(50);
