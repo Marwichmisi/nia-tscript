@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --port 1420",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "postinstall": "node scripts/pin-zod-v3.mjs"
   },
   "dependencies": {
     "@ai-sdk/provider": "^4.0.35",
