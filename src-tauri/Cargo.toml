@@ -26,6 +26,11 @@ getrandom = "0.3"
 notify = "8"
 notify-debouncer-mini = "0.7"
 sha2 = "0.10"
+# T4 BYOK (ticket #58) : HTTP allowlisté (rustls natif 0.13 : aws-lc +
+# vérifieur plateforme, pas d'OpenSSL système) + vault AES-256-GCM
+# (sans `getrandom` interne : nonce via getrandom 0.3).
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
