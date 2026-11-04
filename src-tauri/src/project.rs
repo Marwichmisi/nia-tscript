@@ -459,6 +459,62 @@ pub fn reconcile_registry(reg: &mut Registry) -> Reconciled {
     }
 }
 
+// --- Ticket #57 (T3-sync) : disque source unique, `BootState` miroir -----
+// Le disque (`mcp.json` + Registre) est la source unique de vérité ; le
+// backend ne fait que synchroniser son miroir mémoire. Ces deux fonctions
+// pures sont la couture testée (aucun canal sidecar→backend, cf. ADR-0003).
+
+/// Décision de sync : que doit devenir le miroir face à la valeur disque ?
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenSyncDecision {
+    /// Rester sur le Projet courant : valeur disque invalide ou hors
+    /// Registre (Confinement refusé) — jamais d'Accueil forcé.
+    Keep,
+    /// Basculer le miroir : `Some` = Projet ouvert, `None` = Accueil
+    /// (`project_close` MCP, dossier supprimé).
+    Set(Option<String>),
+}
+
+/// Résout la valeur disque (`projectPath` du lockfile, `None` si absent)
+/// en décision : existence dossier + appartenance Registre vérifiées.
+/// Orphelin → `Set(None)` (Accueil, Registre conservé — jamais de chemin
+/// fantôme) ; hors Registre → `Keep` (Confinement refusé).
+pub fn decide_open_sync(disk_project: Option<&str>, reg: &Registry) -> OpenSyncDecision {
+    let Some(raw) = disk_project else {
+        return OpenSyncDecision::Set(None);
+    };
+    let canonical = match canonical_project_path(raw) {
+        Ok(p) => p,
+        Err(_) => return OpenSyncDecision::Keep,
+    };
+    if !canonical.exists() {
+        return OpenSyncDecision::Set(None);
+    }
+    if !is_project_member(&canonical.to_string_lossy(), reg) {
+        return OpenSyncDecision::Keep;
+    }
+    OpenSyncDecision::Set(Some(canonical.to_string_lossy().into_owned()))
+}
+
+/// Projet à reprendre au boot (décision explicite T3) : le lock gagne quand
+/// il porte un Projet valide ; sinon — app fermée pendant un `project_open`
+/// MCP, qui n'écrit que le Registre (garde prod : le MCP ne crée jamais de
+/// lockfile) — reprise du `lastOpened` du Registre s'il est vivant et
+/// membre, sinon Accueil (`None`). Conséquence assumée : après un
+/// `project_close` suivi d'un redémarrage, le dernier du Registre rouvre.
+pub fn boot_open_project(lock_project: Option<&str>, reg: &Registry) -> Option<String> {
+    match decide_open_sync(lock_project, reg) {
+        OpenSyncDecision::Set(Some(p)) => Some(p),
+        _ => match reg.last_opened.clone() {
+            Some(last) => match decide_open_sync(Some(&last), reg) {
+                OpenSyncDecision::Set(Some(p)) => Some(p),
+                _ => None,
+            },
+            None => None,
+        },
+    }
+}
+
 pub fn serialize_registry(reg: &Registry) -> Result<String, String> {
     serde_json::to_string_pretty(reg).map_err(|e| format!("sérialisation registre : {e}"))
 }
@@ -1038,6 +1094,143 @@ mod tests {
         assert!(trash.is_empty(), "pas de corbeille en V1 : {trash:?}");
         // Registre nettoyé.
         assert!(load_registry_file(&cache).projects.is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // --- Ticket #57 (T3-sync) : décision de sync disque → miroir ---------
+    // RED : ces tests échouent tant que `decide_open_sync` /
+    // `boot_open_project` n'existent pas (couture pure, sans GUI).
+
+    fn sync_tmp(name: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("nia-sync-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    fn sync_registered(base: &Path, name: &str) -> PathBuf {
+        let dir = base.join(name);
+        std::fs::create_dir_all(dir.join("previews")).unwrap();
+        std::fs::write(dir.join("main.tsx"), "code").unwrap();
+        dir
+    }
+
+    fn sync_registry(a: &Path, b: &Path) -> Registry {
+        let mut reg = Registry::default();
+        upsert_registry(&mut reg, a.to_str().unwrap(), "2026-01-01T00:00:00Z");
+        upsert_registry(&mut reg, b.to_str().unwrap(), "2026-01-02T00:00:00Z");
+        reg.last_opened = Some(b.to_string_lossy().into_owned());
+        reg
+    }
+
+    #[test]
+    fn t3_sync_close_disque_mene_a_accueil() {
+        let base = sync_tmp("close");
+        let a = sync_registered(&base, "a");
+        let b = sync_registered(&base, "b");
+        let reg = sync_registry(&a, &b);
+        // `project_close` MCP : lock sans projectPath → Accueil.
+        assert_eq!(decide_open_sync(None, &reg), OpenSyncDecision::Set(None));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn t3_sync_open_membre_existant_bascule() {
+        let base = sync_tmp("open");
+        let a = sync_registered(&base, "a");
+        let b = sync_registered(&base, "b");
+        let reg = sync_registry(&a, &b);
+        let b_canon = canonical_project_path(b.to_str().unwrap())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            decide_open_sync(Some(&b_canon), &reg),
+            OpenSyncDecision::Set(Some(b_canon))
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn t3_sync_orphelin_mene_a_accueil_registre_conserve() {
+        let base = sync_tmp("orphelin");
+        let a = sync_registered(&base, "a");
+        let gone = base.join("gone");
+        let mut reg = Registry::default();
+        upsert_registry(&mut reg, a.to_str().unwrap(), "2026-01-01T00:00:00Z");
+        upsert_registry(&mut reg, gone.to_str().unwrap(), "2026-01-02T00:00:00Z");
+        reg.last_opened = Some(gone.to_string_lossy().into_owned());
+        // Dossier supprimé → Accueil, jamais de chemin fantôme.
+        assert_eq!(
+            decide_open_sync(Some(gone.to_str().unwrap()), &reg),
+            OpenSyncDecision::Set(None)
+        );
+        // Registre conservé : l'Oubli/Relink reste un geste explicite.
+        assert_eq!(reg.projects.len(), 2, "orphelin conservé au Registre");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn t3_sync_hors_registre_refuse_confinement() {
+        let base = sync_tmp("hors");
+        let a = sync_registered(&base, "a");
+        let outsider = sync_registered(&base, "outsider");
+        let mut reg = Registry::default();
+        upsert_registry(&mut reg, a.to_str().unwrap(), "2026-01-01T00:00:00Z");
+        // Existe mais hors Registre → refusé (on reste, pas d'Accueil forcé).
+        assert_eq!(
+            decide_open_sync(Some(outsider.to_str().unwrap()), &reg),
+            OpenSyncDecision::Keep
+        );
+        assert_eq!(
+            decide_open_sync(Some("/tmp/../etc"), &reg),
+            OpenSyncDecision::Keep,
+            "traversal refusé"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn t3_sync_boot_sans_lock_reprend_lastopened_vivant() {
+        let base = sync_tmp("boot");
+        let a = sync_registered(&base, "a");
+        let b = sync_registered(&base, "b");
+        let reg = sync_registry(&a, &b);
+        // App fermée : MCP open n'a écrit que le Registre ; au boot sans
+        // projectPath, reprise du lastOpened (décision explicite T3).
+        let b_canon = canonical_project_path(b.to_str().unwrap())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(boot_open_project(None, &reg), Some(b_canon));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn t3_sync_boot_lastopened_orphelin_jamais_fantome() {
+        let base = sync_tmp("boot-orphelin");
+        let a = sync_registered(&base, "a");
+        let gone = base.join("gone");
+        let mut reg = Registry::default();
+        upsert_registry(&mut reg, a.to_str().unwrap(), "2026-01-01T00:00:00Z");
+        upsert_registry(&mut reg, gone.to_str().unwrap(), "2026-01-02T00:00:00Z");
+        reg.last_opened = Some(gone.to_string_lossy().into_owned());
+        assert_eq!(boot_open_project(None, &reg), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn t3_sync_boot_lock_valide_gagne_sur_registre() {
+        let base = sync_tmp("boot-lock");
+        let a = sync_registered(&base, "a");
+        let b = sync_registered(&base, "b");
+        let reg = sync_registry(&a, &b);
+        let a_canon = canonical_project_path(a.to_str().unwrap())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(boot_open_project(Some(&a_canon), &reg), Some(a_canon));
+        assert_eq!(boot_open_project(None, &Registry::default()), None);
         let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -629,6 +629,57 @@ export default function App() {
     };
   }, [projectPath, resyncFromDisk]);
 
+  // T3-sync : le disque est la source unique (`project_open` / `close` MCP)
+  // — le backend émet `project-open-changed`, la WebView resynchronise
+  // (refresh + relecture main + reset du hash connu et de l'erreur).
+  useEffect(() => {
+    let alive = true;
+    let unlisten: (() => void) | null = null;
+    void listen<{ projectPath: string | null }>("project-open-changed", (evt) => {
+      if (!alive) return;
+      const next = evt.payload?.projectPath ?? null;
+      log(`T3-sync : changement Projet via disque → ${next ?? "Accueil"}`);
+      // Reset explicite avant refresh (la relecture main repeuple).
+      setKnownHash(null);
+      setReadError(null);
+      void refreshProjects().then(() => {
+        if (!alive) return;
+        pushToast(
+          "ok",
+          next ? `Projet ouvert via MCP : ${projectName(next)}` : "Projet fermé via MCP — Accueil",
+        );
+      });
+    })
+      .then((u) => {
+        if (alive) unlisten = u;
+        else u();
+      })
+      .catch(() => {
+        /* hors Tauri : le repli permanent ci-dessous couvre déjà */
+      });
+    return () => {
+      alive = false;
+      if (unlisten) unlisten();
+    };
+  }, [log, pushToast, refreshProjects]);
+
+  // T3-sync : repli permanent (~5 s sur `current_project`), actif même quand
+  // l'écoute réussit (le polling niché dans le `.catch` restait du code mort).
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      void currentProject()
+        .then((cur) => {
+          if (cur !== projectPathRef.current) {
+            void refreshProjects();
+          }
+        })
+        .catch(() => {
+          /* le bandeau + toast du prochain succès/échec parleront */
+        });
+    }, 5000);
+    return () => window.clearInterval(id);
+  }, [refreshProjects]);
+
   /** Recompiler avec relecture disque d'abord (fini le snapshot périmé) :
    *  hash identique → toast « Déjà à jour », sinon compile le code relu.
    *  Désactivé pendant la compilation (fini le double-clic en boucle). */

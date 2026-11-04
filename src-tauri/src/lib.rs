@@ -82,6 +82,84 @@ fn rewatch_current(app: &tauri::AppHandle, state: &tauri::State<'_, Arc<Mutex<Bo
     rewatch_main(app, project.as_deref());
 }
 
+// --- Sync Projet ouvert via disque (ticket #57, spec #55) -------------------
+// T3-sync : le disque (`mcp.json` + Registre) est la source unique, le
+// `BootState` un simple miroir. Le sidecar n'a aucun canal vers le backend
+// (ADR-0003) : un thread dédié poll le disque toutes les 1-2 s (pas de
+// busy-loop) et applique `decide_open_sync` (Confinement + orphelins).
+struct OpenSync {
+    stop: Arc<AtomicBool>,
+}
+
+static OPEN_SYNC: OnceLock<Mutex<Option<OpenSync>>> = OnceLock::new();
+
+fn open_sync_slot() -> &'static Mutex<Option<OpenSync>> {
+    OPEN_SYNC.get_or_init(|| Mutex::new(None))
+}
+
+/// Intervalle du poll disque : 1-2 s en thread dédié (spec #55).
+const OPEN_SYNC_POLL: Duration = Duration::from_millis(1500);
+
+/// Lit le Projet disque (`mcp.json:projectPath`, best-effort) : `None` si
+/// lock absent/illisible/sans projet (garde prod : lock absent = Accueil ;
+/// le MCP ne crée jamais de lockfile, il ne fait que le patcher).
+fn read_disk_project(cache_dir: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(boot::lockfile_path(cache_dir)).ok()?;
+    let data: serde_json::Value = serde_json::from_str(&text).ok()?;
+    data.get("projectPath")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Démarre la sync disque → miroir (un seul poll actif ; l'ancien est
+/// stoppé). Au changement canonique : `set_current` + rewatch + émission
+/// du nouvel event `project-open-changed` (distinct de
+/// `project-main-changed`). Hors Registre → refusé (on reste, sans log
+/// à chaque tour) ; orphelin/fermeture → Accueil, Registre conservé.
+fn start_open_sync(app: &tauri::AppHandle) {
+    if let Some(prev) = open_sync_slot().lock().expect("open sync").take() {
+        prev.stop.store(true, Ordering::SeqCst);
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        while !flag.load(Ordering::SeqCst) {
+            std::thread::sleep(OPEN_SYNC_POLL);
+            if flag.load(Ordering::SeqCst) {
+                break;
+            }
+            let Some(cache) = boot::base_cache_dir() else {
+                continue;
+            };
+            let reg = project::load_registry_file(&cache);
+            let disk = read_disk_project(&cache);
+            match project::decide_open_sync(disk.as_deref(), &reg) {
+                // T3-sync : hors Registre → Confinement refusé, on reste.
+                project::OpenSyncDecision::Keep => {}
+                project::OpenSyncDecision::Set(next) => {
+                    let state = handle.state::<Arc<Mutex<BootState>>>();
+                    let cur = state.lock().expect("boot state").project_path.clone();
+                    if next != cur {
+                        if next.is_some() {
+                            eprintln!("[sync] projet ouvert via disque");
+                        } else {
+                            eprintln!("[sync] retour Accueil via disque");
+                        }
+                        set_current_state(&state, next.clone());
+                        rewatch_main(&handle, next.as_deref());
+                        let _ = handle.emit(
+                            watch::OPEN_CHANGED_EVENT,
+                            watch::open_changed_payload(next.as_deref()),
+                        );
+                    }
+                }
+            }
+        }
+    });
+    *open_sync_slot().lock().expect("open sync") = Some(OpenSync { stop });
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub(crate) struct BootState {
     ready: bool,
@@ -218,9 +296,13 @@ fn write_lock_project(project: Option<&str>) {
     project::write_lock_project(&cache, project);
 }
 
-fn set_current(state: &tauri::State<'_, Arc<Mutex<BootState>>>, project: Option<String>) {
+fn set_current_state(state: &Arc<Mutex<BootState>>, project: Option<String>) {
     state.lock().expect("boot state").project_path = project.clone();
     write_lock_project(project.as_deref());
+}
+
+fn set_current(state: &tauri::State<'_, Arc<Mutex<BootState>>>, project: Option<String>) {
+    set_current_state(state, project);
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -534,10 +616,27 @@ pub fn run() {
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
                 match boot_or_attach(&handle) {
-                    Ok(info) => {
+                    Ok(mut info) => {
+                        // T3-sync : reprise Registre au boot sans projectPath
+                        // (décision explicite : le MCP `open` app fermée
+                        // n'écrit que le Registre — garde prod : le MCP ne
+                        // crée jamais de lockfile — et l'orphelin ne rouvre
+                        // jamais, cf. `boot_open_project`).
+                        if info.project_path.is_none() {
+                            if let Some(cache) = boot::base_cache_dir() {
+                                let reg = project::load_registry_file(&cache);
+                                if let Some(resumed) = project::boot_open_project(None, &reg) {
+                                    eprintln!("[boot] reprise Registre (T3-sync)");
+                                    project::write_lock_project(&cache, Some(&resumed));
+                                    info.project_path = Some(resumed);
+                                }
+                            }
+                        }
                         // Watcher temps réel (ticket #43) : armé sur le Projet
                         // rouvert au boot, retiré si Accueil.
                         rewatch_main(&handle, info.project_path.as_deref());
+                        // T3-sync : poll disque 1-2 s (miroir suit le MCP).
+                        start_open_sync(&handle);
                         *state.lock().expect("boot state") = info;
                     }
                     Err(e) => {

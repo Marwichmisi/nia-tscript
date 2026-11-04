@@ -20,6 +20,27 @@ use sha2::{Digest, Sha256};
 /// Nom d'événement Tauri consommé par la WebView (`listen`).
 pub const MAIN_CHANGED_EVENT: &str = "project-main-changed";
 
+/// Nom d'événement du changement de Projet ouvert (ticket #57, spec #55) :
+/// émis par le watcher disque Rust quand le Projet canonique change
+/// (`project_open` / `project_close` MCP), distinct de
+/// `project-main-changed` (contenu `main.tsx` du Projet courant).
+pub const OPEN_CHANGED_EVENT: &str = "project-open-changed";
+
+/// Payload `{ projectPath: string|null }` : Projet ouvert canonique ou
+/// `null` si Accueil (fermeture, dossier supprimé).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OpenChangedPayload {
+    #[serde(rename = "projectPath")]
+    pub project_path: Option<String>,
+}
+
+/// Construit le payload depuis le Projet canonique (`None` = Accueil).
+pub fn open_changed_payload(project: Option<&str>) -> OpenChangedPayload {
+    OpenChangedPayload {
+        project_path: project.map(|s| s.to_string()),
+    }
+}
+
 /// Debounce du watcher (rafale d'écritures agent → un seul événement).
 pub const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
 
@@ -239,5 +260,27 @@ mod tests {
             "aucun événement après stop"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- Ticket #57 (T3-sync) : nouvel event de Projet ouvert -------------
+    // RED : échoue tant que `OPEN_CHANGED_EVENT` / `OpenChangedPayload`
+    // n'existent pas (couture event, distincte de `project-main-changed`).
+
+    #[test]
+    fn t3_open_event_distinct_du_main_changed() {
+        assert_eq!(OPEN_CHANGED_EVENT, "project-open-changed");
+        assert_ne!(OPEN_CHANGED_EVENT, MAIN_CHANGED_EVENT);
+    }
+
+    #[test]
+    fn t3_open_payload_serialise_projectpath_ou_null() {
+        let open = open_changed_payload(Some("/tmp/projet-b"));
+        let json = serde_json::to_string(&open).expect("sérialisable");
+        assert!(json.contains("\"projectPath\""), "clé contrat : {json}");
+        assert!(json.contains("/tmp/projet-b"), "chemin porté : {json}");
+        let close = open_changed_payload(None);
+        let json = serde_json::to_string(&close).expect("sérialisable");
+        let back: serde_json::Value = serde_json::from_str(&json).expect("re-lit");
+        assert_eq!(back.get("projectPath"), Some(&serde_json::Value::Null));
     }
 }
