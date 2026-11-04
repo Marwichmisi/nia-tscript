@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   Camera,
+  KeyRound,
   PanelBottom,
   RotateCw,
   TriangleAlert,
@@ -36,6 +37,9 @@ import {
 } from "./lib/projects";
 import { ViewerErrorBoundary } from "./components/ErrorBoundary";
 import { Terminal, type Shot, type TermTab } from "./components/Terminal";
+// T4-byok (ticket #58) : Paramètres clé API Meta + bandeau agent désactivé.
+import { LlmKeyBanner, LlmSettings } from "./components/LlmSettings";
+import { llmStatus, type LlmStatus } from "./lib/llm";
 import { Button } from "./components/ui/button";
 import { Badge } from "./components/ui/badge";
 import { Tabs, TabsList, TabsTrigger } from "./components/ui/tabs";
@@ -210,6 +214,11 @@ export default function App() {
   /** Compteur de compiles terminées : la frontière d'erreur repart saine à
    *  chaque nouveau circuit-json (ticket #45). */
   const [compileSeq, setCompileSeq] = useState(0);
+  // T4-byok (ticket #58) : Paramètres clé Meta + statut agent (masque seul,
+  // jamais la clé ; `llmKeyRefused` pilote le bandeau « rouvre les Paramètres »).
+  const [llmOpen, setLlmOpen] = useState(false);
+  const [llmStatusState, setLlmStatusState] = useState<LlmStatus | null>(null);
+  const [llmKeyRefused, setLlmKeyRefused] = useState(false);
   const [pcbRenderer, setPcbRenderer] = useState<"webgpu" | "canvas">(() => initialPcbRenderer());
   const tsxCopy = useCopyFeedback();
   const bridgeCopy = useCopyFeedback();
@@ -249,6 +258,37 @@ export default function App() {
     return () => {
       timers.forEach((t) => window.clearTimeout(t));
     };
+  }, []);
+
+  // T4-byok (ticket #58) : statut clé (lecture seule, aucun secret, aucun
+  // réseau) — jamais bloquant pour le rendu (offline-first intact).
+  useEffect(() => {
+    if (!projectPath) {
+      setLlmStatusState(null);
+      setLlmKeyRefused(false);
+      return;
+    }
+    let cancelled = false;
+    llmStatus()
+      .then((s) => {
+        if (!cancelled) {
+          setLlmStatusState(s);
+          setLlmKeyRefused(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLlmStatusState(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectPath]);
+
+  // T4-byok (ticket #58) : remontée statut depuis les Paramètres (stable pour
+  // ne pas re-déclencher la lecture statut à chaque render).
+  const handleLlmStatus = useCallback((s: LlmStatus | null, refused: boolean) => {
+    setLlmStatusState(s);
+    setLlmKeyRefused(refused);
   }, []);
 
   /** Relit le disque et resynchronise si le hash a changé (`prevHash` = hash
@@ -868,6 +908,17 @@ export default function App() {
               <Camera size={14} aria-hidden="true" />
               {shotBusy ? "Capture…" : "Screenshot"}
             </Button>
+            {/* T4-byok (ticket #58) : Paramètres clé API Meta. */}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setLlmOpen(true)}
+              aria-label="Paramètres — clé API Meta"
+              title="Clé API Meta (BYOK, chiffrée)"
+            >
+              <KeyRound size={14} aria-hidden="true" />
+              Clé API
+            </Button>
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -934,6 +985,13 @@ export default function App() {
           <span>{banner}</span>
         </div>
       )}
+
+      {/* T4-byok (ticket #58) : bandeau agent désactivé / clé refusée. */}
+      <LlmKeyBanner
+        configured={llmStatusState?.configured === true}
+        keyRefused={llmKeyRefused}
+        onOpenSettings={() => setLlmOpen(true)}
+      />
 
       <main id="viewer" className="viewer-main" aria-label={`Visualiseur ${TAB_LABEL[tab]}`} aria-busy={compiling}>
         {/* Pastilles décoratives masquées (l'onglet est déjà annoncé par
@@ -1071,6 +1129,15 @@ export default function App() {
           ))}
         </div>
       )}
+
+      {/* T4-byok (ticket #58) : écran Paramètres → Clé API Meta. */}
+      <LlmSettings
+        open={llmOpen}
+        onClose={() => setLlmOpen(false)}
+        projectPath={projectPath}
+        notify={pushToast}
+        onStatusChange={handleLlmStatus}
+      />
 
       {pasteOpen && (
         <div

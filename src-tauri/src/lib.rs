@@ -1,4 +1,5 @@
 mod boot;
+mod llm;
 mod preview;
 mod project;
 mod watch;
@@ -82,7 +83,7 @@ fn rewatch_current(app: &tauri::AppHandle, state: &tauri::State<'_, Arc<Mutex<Bo
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
-struct BootState {
+pub(crate) struct BootState {
     ready: bool,
     port: u16,
     pid: u32,
@@ -93,7 +94,7 @@ struct BootState {
     bridge_path: String,
     /// Projet ouvert (Q8/Q15) : chemin absolu ou null si Accueil.
     #[serde(rename = "projectPath")]
-    project_path: Option<String>,
+    pub(crate) project_path: Option<String>,
 }
 
 impl BootState {
@@ -562,7 +563,16 @@ pub fn run() {
             request_delete_token,
             delete_project,
             read_project_main,
-            write_project_main
+            write_project_main,
+            // T4 BYOK (ticket #58) : surface IPC LLM — seule autorisée à
+            // appeler le fournisseur (cœur testé dans `llm.rs`, jamais de
+            // clé vers le frontend, CSP `connect-src` inchangée).
+            llm::llm_status,
+            llm::llm_verify_and_save,
+            llm::llm_test,
+            llm::llm_clear,
+            llm::llm_set_telemetry,
+            llm::llm_complete
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
