@@ -1,3 +1,4 @@
+mod agent; // T5-agent : routeur local (moitié backend, issue #60)
 mod boot;
 mod llm;
 mod preview;
@@ -663,6 +664,13 @@ pub fn run() {
             delete_project,
             read_project_main,
             write_project_main,
+            // T5-agent (issue #60) : commandes fines du routeur local — seule
+            // surface IPC du chemin interne (aucun HTTP/Bearer, jamais de
+            // secret vers le frontend).
+            agent::agent_fetch,
+            agent::agent_commit_files,
+            agent::agent_fab_write,
+            agent::agent_preview_read,
             // T4 BYOK (ticket #58) : surface IPC LLM — seule autorisée à
             // appeler le fournisseur (cœur testé dans `llm.rs`, jamais de
             // clé vers le frontend, CSP `connect-src` inchangée).
