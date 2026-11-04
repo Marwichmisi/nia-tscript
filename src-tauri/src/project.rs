@@ -496,25 +496,6 @@ pub fn decide_open_sync(disk_project: Option<&str>, reg: &Registry) -> OpenSyncD
     OpenSyncDecision::Set(Some(canonical.to_string_lossy().into_owned()))
 }
 
-/// Projet à reprendre au boot (décision explicite T3) : le lock gagne quand
-/// il porte un Projet valide ; sinon — app fermée pendant un `project_open`
-/// MCP, qui n'écrit que le Registre (garde prod : le MCP ne crée jamais de
-/// lockfile) — reprise du `lastOpened` du Registre s'il est vivant et
-/// membre, sinon Accueil (`None`). Conséquence assumée : après un
-/// `project_close` suivi d'un redémarrage, le dernier du Registre rouvre.
-pub fn boot_open_project(lock_project: Option<&str>, reg: &Registry) -> Option<String> {
-    match decide_open_sync(lock_project, reg) {
-        OpenSyncDecision::Set(Some(p)) => Some(p),
-        _ => match reg.last_opened.clone() {
-            Some(last) => match decide_open_sync(Some(&last), reg) {
-                OpenSyncDecision::Set(Some(p)) => Some(p),
-                _ => None,
-            },
-            None => None,
-        },
-    }
-}
-
 pub fn serialize_registry(reg: &Registry) -> Result<String, String> {
     serde_json::to_string_pretty(reg).map_err(|e| format!("sérialisation registre : {e}"))
 }
@@ -1098,8 +1079,10 @@ mod tests {
     }
 
     // --- Ticket #57 (T3-sync) : décision de sync disque → miroir ---------
-    // RED : ces tests échouent tant que `decide_open_sync` /
-    // `boot_open_project` n'existent pas (couture pure, sans GUI).
+    // RED : ces tests échouaient tant que `decide_open_sync` n'existait pas
+    // (couture pure, sans GUI). Pas de couture testable pour le boot lui-même
+    // (closure de setup) : le contrat « sans lockfile → Accueil » est porté
+    // par `decide_open_sync(None) == Set(None)` ci-dessous + revue manuelle.
 
     fn sync_tmp(name: &str) -> PathBuf {
         let base = std::env::temp_dir().join(format!("nia-sync-{}-{name}", std::process::id()));
@@ -1187,50 +1170,6 @@ mod tests {
             OpenSyncDecision::Keep,
             "traversal refusé"
         );
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn t3_sync_boot_sans_lock_reprend_lastopened_vivant() {
-        let base = sync_tmp("boot");
-        let a = sync_registered(&base, "a");
-        let b = sync_registered(&base, "b");
-        let reg = sync_registry(&a, &b);
-        // App fermée : MCP open n'a écrit que le Registre ; au boot sans
-        // projectPath, reprise du lastOpened (décision explicite T3).
-        let b_canon = canonical_project_path(b.to_str().unwrap())
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        assert_eq!(boot_open_project(None, &reg), Some(b_canon));
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn t3_sync_boot_lastopened_orphelin_jamais_fantome() {
-        let base = sync_tmp("boot-orphelin");
-        let a = sync_registered(&base, "a");
-        let gone = base.join("gone");
-        let mut reg = Registry::default();
-        upsert_registry(&mut reg, a.to_str().unwrap(), "2026-01-01T00:00:00Z");
-        upsert_registry(&mut reg, gone.to_str().unwrap(), "2026-01-02T00:00:00Z");
-        reg.last_opened = Some(gone.to_string_lossy().into_owned());
-        assert_eq!(boot_open_project(None, &reg), None);
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn t3_sync_boot_lock_valide_gagne_sur_registre() {
-        let base = sync_tmp("boot-lock");
-        let a = sync_registered(&base, "a");
-        let b = sync_registered(&base, "b");
-        let reg = sync_registry(&a, &b);
-        let a_canon = canonical_project_path(a.to_str().unwrap())
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        assert_eq!(boot_open_project(Some(&a_canon), &reg), Some(a_canon));
-        assert_eq!(boot_open_project(None, &Registry::default()), None);
         let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "nia-tscircuit-studio"
-version = "0.1.3"
+version = "0.1.4"
 description = "Studio PCB agentique (Tauri + tscircuit), piloté par ton agent IA via MCP."
 authors = ["nia-tscircuit"]
 edition = "2021"
@@ -14,6 +14,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# Runtime async direct (sleep + tests) : mêmes sources que le transitif.
+tokio = { version = "1", features = ["macros", "rt", "time"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-shell = "2"

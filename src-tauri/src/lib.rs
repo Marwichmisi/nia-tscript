@@ -617,22 +617,14 @@ pub fn run() {
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
                 match boot_or_attach(&handle) {
-                    Ok(mut info) => {
-                        // T3-sync : reprise Registre au boot sans projectPath
-                        // (décision explicite : le MCP `open` app fermée
-                        // n'écrit que le Registre — garde prod : le MCP ne
-                        // crée jamais de lockfile — et l'orphelin ne rouvre
-                        // jamais, cf. `boot_open_project`).
-                        if info.project_path.is_none() {
-                            if let Some(cache) = boot::base_cache_dir() {
-                                let reg = project::load_registry_file(&cache);
-                                if let Some(resumed) = project::boot_open_project(None, &reg) {
-                                    eprintln!("[boot] reprise Registre (T3-sync)");
-                                    project::write_lock_project(&cache, Some(&resumed));
-                                    info.project_path = Some(resumed);
-                                }
-                            }
-                        }
+                    Ok(info) => {
+                        // PAS de reprise du Registre au boot : sans lockfile
+                        // (fermeture normale le supprime, le MCP n'en crée
+                        // jamais), l'app démarre sur l'Accueil et c'est
+                        // l'utilisateur qui ouvre son Projet. Un lockfile
+                        // survivant (crash) rouvre le Projet — voulu.
+                        // Le MCP `open` app fermée n'écrit que le Registre :
+                        // visible dans l'Accueil, à ouvrir à la main.
                         // Watcher temps réel (ticket #43) : armé sur le Projet
                         // rouvert au boot, retiré si Accueil.
                         rewatch_main(&handle, info.project_path.as_deref());
