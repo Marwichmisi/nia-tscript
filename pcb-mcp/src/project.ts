@@ -1,55 +1,84 @@
 // Projets dossier côté sidecar (Seam B pur + I/O partagée avec Tauri).
+// HÔTE T1 (#56) : le pur (cœur) vit dans tools-core/project-core.ts et est
+// réexporté ici pour compatibilité ; ce module garde l'I/O (node:fs/os/path,
+// env) : Registre/lockfile, layout, persistance, résolution du Projet ouvert.
 // Registre + lockfile vivent sous base cache `niatscircuit/` (même raison que
 // bug #25 : pont externe doit calculer le même chemin que Rust).
 import fs from "node:fs";
 import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
+import {
+  assertProjectMember as assertProjectMemberCore,
+  buildMainChangedEvent as buildMainChangedEventCore,
+  CIRCUIT_SCHEMA_VERSION,
+  isProjectMember as isProjectMemberCore,
+  canonicalProjectPath as canonicalProjectPathCore,
+  parentOfProjectPath as parentOfProjectPathCore,
+  projectCircuitPath as projectCircuitPathCore,
+  projectExportsDir as projectExportsDirCore,
+  projectMainPath as projectMainPathCore,
+  projectPreviewsDir as projectPreviewsDirCore,
+  hashCanonicalPath as hashCanonicalPathCore,
+  hashMainCode as hashMainCodeCore,
+  parseCircuitFile,
+  reconcileRegistry as reconcileRegistryCore,
+  rereadMainIfChanged as rereadMainIfChangedCore,
+  serializeCircuitFile,
+  upsertRegistry as upsertRegistryCore,
+  validateProjectPath as validateProjectPathCore,
+  EMPTY_CODE,
+  DEMO_CODE,
+  templateCode,
+  NO_PROJECT_OPEN,
+  OUT_OF_SCOPE,
+  MAIN_FILE,
+  CIRCUIT_FILE,
+  PREVIEWS_DIR,
+  EXPORTS_DIR,
+  emptyRegistry,
+  type CircuitFile,
+  type MainChangedEvent,
+  type MainWithHash,
+  type ProjectListItem,
+  type ReconciledRegistry,
+  type Registry,
+  type RegistryEntry,
+  type RereadResult,
+} from "./tools-core/project-core.js";
 
-export const MAIN_FILE = "main.tsx";
-export const CIRCUIT_FILE = "circuit.json";
-export const PREVIEWS_DIR = "previews";
-export const EXPORTS_DIR = "exports";
+export {
+  CIRCUIT_SCHEMA_VERSION,
+  parseCircuitFile,
+  serializeCircuitFile,
+  NO_PROJECT_OPEN,
+  OUT_OF_SCOPE,
+  EMPTY_CODE,
+  DEMO_CODE,
+  templateCode,
+  MAIN_FILE,
+  CIRCUIT_FILE,
+  PREVIEWS_DIR,
+  EXPORTS_DIR,
+  emptyRegistry,
+  type CircuitFile,
+  type MainChangedEvent,
+  type MainWithHash,
+  type ProjectListItem,
+  type ReconciledRegistry,
+  type Registry,
+  type RegistryEntry,
+  type RereadResult,
+};
 
-/** Version du schéma `circuit.json` (spec #37, ticket #38). Le fichier disque
- *  est une enveloppe `{ version, circuitJson }` ; le tableau nu legacy est
- *  migré à l'ouverture, le corrompu est une erreur visible. */
-export const CIRCUIT_SCHEMA_VERSION = 1;
-
-export interface CircuitFile {
-  version: number;
-  circuitJson: unknown[];
+/** sha256 hex (node:crypto), injectée au cœur pur. */
+function nodeSha256Hex(s: string): string {
+  return crypto.createHash("sha256").update(s, "utf8").digest("hex");
 }
 
-/** Sérialise les éléments en enveloppe versionnée. */
-export function serializeCircuitFile(circuitJson: unknown[]): string {
-  return JSON.stringify({ version: CIRCUIT_SCHEMA_VERSION, circuitJson });
-}
-
-/** Parse strict : enveloppe versionnée ou tableau nu legacy (migré en mémoire).
- *  Throw `circuit.json …` visible dans tous les autres cas (corrompu, version
- *  inconnue, enveloppe invalide) — jamais de défaut silencieux. */
-export function parseCircuitFile(text: string): CircuitFile {
-  let data: unknown;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error("circuit.json corrompu (JSON illisible) : ouvrez le dossier pour inspecter, sans écrasement automatique");
-  }
-  if (Array.isArray(data)) return { version: CIRCUIT_SCHEMA_VERSION, circuitJson: data };
-  if (typeof data === "object" && data !== null) {
-    const obj = data as Record<string, unknown>;
-    if (obj["version"] !== CIRCUIT_SCHEMA_VERSION) {
-      throw new Error(
-        `circuit.json version ${String(obj["version"] ?? "absente")} non supportée (attendue : ${CIRCUIT_SCHEMA_VERSION})`,
-      );
-    }
-    if (!Array.isArray(obj["circuitJson"])) {
-      throw new Error("circuit.json corrompu (circuitJson absent ou invalide)");
-    }
-    return { version: CIRCUIT_SCHEMA_VERSION, circuitJson: obj["circuitJson"] as unknown[] };
-  }
-  throw new Error("circuit.json corrompu (ni enveloppe ni tableau)");
+/** Canonicalisation hôte (node:path + symlinks résolus), injectée au cœur. */
+function hostCanonicalize(p: string): string {
+  return canonicalProjectPath(p);
 }
 
 /** Relit les éléments du `circuit.json` d'un Projet. Throw si absent/corrompu. */
@@ -95,52 +124,12 @@ export function ensureCircuitFile(projectPath: string): "created" | "migrated" |
   return "exists";
 }
 
-export const NO_PROJECT_OPEN = "NO_PROJECT_OPEN";
-
-/** Code d'erreur Confinement (ticket #42) : dossier existant mais hors
- *  Registre — ni lecture, ni écriture, ni capture. */
-export const OUT_OF_SCOPE = "OUT_OF_SCOPE";
-
-export const EMPTY_CODE = `export default () => (
-  <board width="20mm" height="20mm" />
-)
-`;
-
-export const DEMO_CODE = `export default () => (
-  <board width="20mm" height="20mm">
-    <resistor name="R1" resistance="10k" footprint="0402" pcbX={-5} pcbY={4} />
-    <resistor name="R2" resistance="10k" footprint="0402" pcbX={-5} pcbY={-4} />
-    <chip name="U1" footprint="sot23" pcbX={5} pcbY={0} />
-    <trace from=".R1 > .pin1" to="net.VCC" />
-    <trace from=".R1 > .pin2" to=".R2 > .pin1" />
-    <trace from=".R1 > .pin2" to=".U1 > .pin1" />
-    <trace from=".R2 > .pin2" to="net.GND" />
-    <trace from=".U1 > .pin2" to="net.GND" />
-    <trace from=".U1 > .pin3" to="net.VCC" />
-  </board>
-)
-`;
-
-export function templateCode(template: string): string | null {
-  const t = (template ?? "").trim().toLowerCase();
-  if (t === "" || t === "vide" || t === "empty") return EMPTY_CODE;
-  if (t === "demo" || t === "gabarit démo" || t === "gabarit-demo") return DEMO_CODE;
-  return null;
-}
-
 /** Refuse vide/relatif/`..`, retourne chemin absolu normalisé.
  *  Le `..` est refusé sur le brut AVANT normalisation (même règle que
  *  `validate_project_path` côté Rust) : `/tmp/../etc` est un traversal,
  *  même si la normalisation le résoudrait en `/etc`. */
 export function validateProjectPath(input: string): string {
-  const raw = (input ?? "").trim();
-  if (!raw) throw new Error("chemin projet vide");
-  if (!path.isAbsolute(raw)) throw new Error("chemin absolu requis");
-  if (raw.split(/[/\\]/).includes("..")) throw new Error("traversal .. refusé");
-  const normalized = path.normalize(raw);
-  const parts = normalized.split(path.sep);
-  if (parts.includes("..")) throw new Error("traversal .. refusé");
-  return normalized;
+  return validateProjectPathCore(input, path);
 }
 
 /** Normalisation unique partagée (spec #37, ticket #38) : absolu, sans slash
@@ -148,17 +137,10 @@ export function validateProjectPath(input: string): string {
  *  la même règle (`canonical_project_path` dans `src-tauri/src/project.rs`).
  *  Toute entrée Registre/lockfile passe par ici (via `upsertRegistry`). */
 export function canonicalProjectPath(input: string): string {
-  const normalized = validateProjectPath(input);
-  let stripped = normalized;
-  const root = path.parse(stripped).root;
-  while (stripped.length > root.length && stripped.endsWith(path.sep)) {
-    stripped = stripped.slice(0, -path.sep.length);
-  }
-  try {
-    return fs.realpathSync(stripped);
-  } catch {
-    return stripped;
-  }
+  return canonicalProjectPathCore(input, {
+    path,
+    realpath: (p) => fs.realpathSync(p),
+  });
 }
 
 /** Écriture atomique (tmp + rename + fsync fichier + fsync dossier) : un kill
@@ -210,20 +192,6 @@ export function lockfilePath(): string {
   return path.join(baseCacheDir(), "niatscircuit", "mcp.json");
 }
 
-export interface RegistryEntry {
-  path: string;
-  lastOpened: string;
-}
-
-export interface Registry {
-  projects: RegistryEntry[];
-  lastOpened: string | null;
-}
-
-export function emptyRegistry(): Registry {
-  return { projects: [], lastOpened: null };
-}
-
 export function loadRegistry(file?: string): Registry {
   const p = file ?? registryPath();
   try {
@@ -246,13 +214,7 @@ export function saveRegistry(reg: Registry, file?: string): void {
 }
 
 export function upsertRegistry(reg: Registry, projectPath: string, now = new Date().toISOString()): Registry {
-  const p = canonicalProjectPath(projectPath);
-  const next: Registry = {
-    projects: [...reg.projects.filter((e) => e.path !== p), { path: p, lastOpened: now }],
-    lastOpened: p,
-  };
-  next.projects.sort((a, b) => (b.lastOpened < a.lastOpened ? -1 : 1));
-  return next;
+  return upsertRegistryCore(reg, projectPath, now, hostCanonicalize);
 }
 
 /** Confinement (spec #37, ticket #42) : une opération dossier n'est
@@ -261,52 +223,20 @@ export function upsertRegistry(reg: Registry, projectPath: string, now = new Dat
  *  ramenée au canonique avant le test — jamais de comparaison sur le brut.
  *  `reg` explicite = sans I/O (tests) ; sinon Registre chargé du disque. */
 export function isProjectMember(input: string, reg?: Registry): boolean {
-  let canonical: string;
-  try {
-    canonical = canonicalProjectPath(input);
-  } catch {
-    return false;
-  }
-  const registry = reg ?? loadRegistry();
-  return registry.projects.some((e) => {
-    try {
-      return canonicalProjectPath(e.path) === canonical;
-    } catch {
-      return e.path === canonical;
-    }
-  });
+  return isProjectMemberCore(input, reg ?? loadRegistry(), hostCanonicalize);
 }
 
 /** Variante qui throw une erreur explicite hors périmètre (jamais de
  *  `NO_PROJECT_OPEN` silencieux : le dossier existe peut-être, mais il
  *  n'est pas un Projet du Registre). Retourne le chemin canonique. */
 export function assertProjectMember(input: string, reg?: Registry): string {
-  const canonical = canonicalProjectPath(input);
-  if (isProjectMember(canonical, reg)) return canonical;
-  throw new Error(
-    `hors périmètre (Confinement) : ${canonical} — opération refusée, le dossier n'est pas un Projet du Registre`,
-  );
-}
-
-export interface ProjectListItem extends RegistryEntry {
-  name: string;
-  /** Dossier parent complet (homonymes distingués dans l'Accueil). */
-  parent: string;
-  exists: boolean;
+  return assertProjectMemberCore(input, reg ?? loadRegistry(), hostCanonicalize);
 }
 
 /** Dossier parent complet d'un chemin Projet ("" si racine). */
 export function parentOfProjectPath(projectPath: string): string {
-  const dir = path.dirname(projectPath);
+  const dir = parentOfProjectPathCore(projectPath, path);
   return dir === projectPath ? "" : dir;
-}
-
-export interface ReconciledRegistry {
-  registry: Registry;
-  /** Chemins du Registre dont le dossier est introuvable (orphelins). */
-  orphans: string[];
-  /** Vrai si `lastOpened` a été réinitialisé (pointait un orphelin). */
-  currentReset: boolean;
 }
 
 /** Réconciliation boot (ticket #38) : existence vérifiée, orphelin explicite
@@ -314,16 +244,7 @@ export interface ReconciledRegistry {
  *  réinitialisé sur le premier Projet existant (sinon null).
  *  Ne touche jamais au disque (cf. `listProjects` pour la persistance). */
 export function reconcileRegistry(reg: Registry): ReconciledRegistry {
-  const orphans = reg.projects.filter((e) => !fs.existsSync(e.path)).map((e) => e.path);
-  const orphanSet = new Set(orphans);
-  let currentReset = false;
-  let lastOpened = reg.lastOpened;
-  if (lastOpened !== null && (orphanSet.has(lastOpened) || !reg.projects.some((e) => e.path === lastOpened))) {
-    const firstAlive = reg.projects.find((e) => !orphanSet.has(e.path));
-    lastOpened = firstAlive ? firstAlive.path : null;
-    currentReset = true;
-  }
-  return { registry: { projects: reg.projects, lastOpened }, orphans, currentReset };
+  return reconcileRegistryCore(reg, (p) => fs.existsSync(p));
 }
 
 /** Liste depuis Registre avec flag orphelin (dossier absent) + parent.
@@ -416,26 +337,26 @@ export function writeLockProjectPath(projectPath: string | null, file?: string):
 }
 
 export function projectMainPath(projectPath: string): string {
-  return path.join(projectPath, MAIN_FILE);
+  return projectMainPathCore(projectPath, path);
 }
 
 export function projectCircuitPath(projectPath: string): string {
-  return path.join(projectPath, CIRCUIT_FILE);
+  return projectCircuitPathCore(projectPath, path);
 }
 
 export function projectPreviewsDir(projectPath: string): string {
-  return path.join(projectPath, PREVIEWS_DIR);
+  return projectPreviewsDirCore(projectPath, path);
 }
 
 export function projectExportsDir(projectPath: string): string {
-  return path.join(projectPath, EXPORTS_DIR);
+  return projectExportsDirCore(projectPath, path);
 }
 
 /** Hash stable (sha256, 12 hex) du chemin canonique : clé d'exports qui
  *  distingue les homonymes (même basename, parents différents).
  *  Miroir documenté côté backend : même règle (sha256 du canonique). */
 export function hashCanonicalPath(canonicalPath: string): string {
-  return crypto.createHash("sha256").update(canonicalPath).digest("hex").slice(0, 12);
+  return hashCanonicalPathCore(canonicalPath, nodeSha256Hex);
 }
 
 /** Dossier d'exports d'un Projet : `<projet>/exports/<basename>-<hash12>` —
@@ -489,26 +410,16 @@ export function persistProjectFiles(projectPath: string, code: string, circuitJs
 
 /** Hash stable du contenu `main.tsx` (sha256 hex, 64 car.). */
 export function hashMainCode(code: string): string {
-  return crypto.createHash("sha256").update(code, "utf8").digest("hex");
-}
-
-/** Payload d'événement `project-main-changed` : ce qui a changé + son hash.
- *  `path` = le `main.tsx` surveillé (pas le dossier), `hash` = son contenu. */
-export interface MainChangedEvent {
-  path: string;
-  hash: string;
+  return hashMainCodeCore(code, nodeSha256Hex);
 }
 
 /** Construit le payload depuis le dossier Projet canonique + code disque. */
 export function buildMainChangedEvent(projectPath: string, code: string): MainChangedEvent {
-  const dir = canonicalProjectPath(projectPath);
-  return { path: path.join(dir, MAIN_FILE), hash: hashMainCode(code) };
-}
-
-export interface MainWithHash {
-  path: string;
-  code: string;
-  hash: string;
+  return buildMainChangedEventCore(projectPath, code, {
+    canonicalize: hostCanonicalize,
+    hash: nodeSha256Hex,
+    path,
+  });
 }
 
 /** Relit `main.tsx` depuis le disque + hash. Throw si illisible (jamais de
@@ -525,11 +436,6 @@ export function readMainWithHash(projectPath: string): MainWithHash {
   return { path: main, code, hash: hashMainCode(code) };
 }
 
-export interface RereadResult extends MainWithHash {
-  /** Vrai si le disque diffère du hash connu → relecture nécessaire. */
-  changed: boolean;
-}
-
 /** Relecture conditionnelle : compare le hash disque au hash connu
  *  (`null` = première lecture, toujours `changed:true`). Ne touche jamais à
  *  la mémoire — l'appelant décide (`setCode` si `changed`). */
@@ -538,5 +444,5 @@ export function rereadMainIfChanged(
   knownHash: string | null,
 ): RereadResult {
   const got = readMainWithHash(projectPath);
-  return { ...got, changed: knownHash === null || got.hash !== knownHash };
+  return rereadMainIfChangedCore(got, knownHash);
 }

@@ -1,6 +1,8 @@
 // Worker de compilation (core + eval, offline-first) — ticket #12.
-// Exécuté dans le sidecar Bun via CircuitRunner (même moteur que le WebWorker
-// blob-url du prototype, sans fetch CDN au runtime).
+// Hôte sidecar Bun (T1, #56) : `compileTsx` via CircuitRunner. Le pur
+// (types, extracteur strict, failure factory) vit dans tools-core/ et est
+// réexporté ici pour compatibilité ; la `CompileFn` est injectée aux outils
+// du cœur via `ToolsDeps` (même `CompileResult` côté WebView).
 //
 // Stratégie CDN/offline unique (#39, alignée avec src/src/lib/compile.ts) :
 // offline-first des deux côtés — worker bundlé local, CDN autorisé par
@@ -15,100 +17,19 @@
 // Note prototype respectée (commit 83ab848) : un entrypoint `export default`
 // exige `mainComponentPath` SANS `entrypoint`, sinon
 // « IsolatedCircuit has no children ». On ne passe donc JAMAIS `entrypoint`.
-import { computeStats, emptyStats, ENTRYPOINT, type CircuitStats } from "./board.js";
+import { computeStats, ENTRYPOINT } from "./tools-core/board.js";
+import {
+  CDN_BANNER,
+  compileFailure,
+  enrichNoChildrenHint,
+  extractEmbeddedDiagnostics,
+  type CompileResult,
+  type Diagnostic,
+} from "./tools-core/diagnostics.js";
 
-export type CompileMode = "worker-blob-local" | "worker-blob-local-nocdn" | "echec";
-
-export interface Diagnostic {
-  severity: "error" | "warning" | "info";
-  message: string;
-  source: string;
-}
-
-export interface CompileResult {
-  circuitJson: unknown[];
-  diagnostics: Diagnostic[];
-  stats: CircuitStats;
-  mode: CompileMode;
-  banner: string | null;
-  errors: number;
-  warnings: number;
-}
-
-const CDN_BANNER =
-  "CDN désactivé (disableCdnLoading) : toute pièce/empreinte non bundlée est indisponible hors-ligne.";
-
-function failResult(message: string, bannerPrefix: string): CompileResult {
-  return {
-    circuitJson: [],
-    diagnostics: [{ severity: "error", message, source: "compile" }],
-    stats: emptyStats(),
-    mode: "echec",
-    banner: `${bannerPrefix} : ${message}`,
-    errors: 1,
-    warnings: 0,
-  };
-}
-
-function firstNonEmptyString(el: Record<string, unknown>, keys: string[]): string | null {
-  for (const k of keys) {
-    const v = el[k];
-    if (typeof v === "string" && v.trim()) return v;
-  }
-  return null;
-}
-
-/**
- * Diagnostics embarqués du circuit-json (#39, revue #37 item 1).
- * Signaux reconnus (indépendants de la version core exacte) :
- * - `type` exactement "error"/"warning" ou à suffixe "_error"/"_warning"
- *   (insensible à la casse ; la sous-chaîne nue — ex "error_report" —
- *   ne compte PAS, sinon faux positifs qui bloquent batch/export) ;
- * - champ explicite `error_message`/`error` (resp. `warning_message`/`warning`).
- * Priorité du libellé : champ explicite > `message` > extrait JSON.
- * Source "circuit-json" (distincte de "compile" et des domaines checks).
- */
-export function extractEmbeddedDiagnostics(circuitJson: unknown[]): Diagnostic[] {
-  const out: Diagnostic[] = [];
-  for (const raw of circuitJson ?? []) {
-    const el = (raw ?? {}) as Record<string, unknown>;
-    const type = typeof el["type"] === "string" ? (el["type"] as string) : "";
-    const lowered = type.toLowerCase();
-    const isErrorType = /(^|_)error$/.test(lowered);
-    const isWarningType = /(^|_)warning$/.test(lowered);
-    const errorField = firstNonEmptyString(el, ["error_message", "error"]);
-    const warningField = firstNonEmptyString(el, ["warning_message", "warning"]);
-    const messageField = firstNonEmptyString(el, ["message"]);
-    if (isErrorType || errorField !== null) {
-      out.push({
-        severity: "error",
-        message: errorField ?? messageField ?? JSON.stringify(raw).slice(0, 300),
-        source: "circuit-json",
-      });
-    } else if (isWarningType || warningField !== null) {
-      out.push({
-        severity: "warning",
-        message: warningField ?? messageField ?? JSON.stringify(raw).slice(0, 300),
-        source: "circuit-json",
-      });
-    }
-  }
-  return out;
-}
-
-function enrichNoChildrenHint(message: string): string {
-  if (
-    message.includes("IsolatedCircuit has no children") ||
-    message.includes("RootCircuit has no children")
-  ) {
-    return (
-      `${message}. "entrypoint" est positionné alors que le fichier exporte un ` +
-      `composant : utilisez mainComponentPath SANS entrypoint ` +
-      `(cf. note prototype commit 83ab848).`
-    );
-  }
-  return message;
-}
+export type { CompileResult, Diagnostic };
+export type { CompileMode } from "./tools-core/diagnostics.js";
+export { extractEmbeddedDiagnostics };
 
 export async function compileTsx(
   code: string,
@@ -126,7 +47,7 @@ export async function compileTsx(
     if (!CircuitRunnerCtor) throw new Error("@tscircuit/eval sans export CircuitRunner");
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    return failResult(message, "RÉSEAU REQUIS pour compiler (moteur tscircuit indisponible)");
+    return compileFailure(message, "RÉSEAU REQUIS pour compiler (moteur tscircuit indisponible)");
   }
 
   const runner = new CircuitRunnerCtor({
@@ -159,6 +80,6 @@ export async function compileTsx(
     };
   } catch (e) {
     const raw = e instanceof Error ? e.message : String(e);
-    return failResult(enrichNoChildrenHint(raw), "Échec compilation");
+    return compileFailure(enrichNoChildrenHint(raw), "Échec compilation");
   }
 }
