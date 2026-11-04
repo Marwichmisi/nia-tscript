@@ -24,6 +24,8 @@ import {
   CircuitJsonToKicadProConverter,
   CircuitJsonToKicadSchConverter,
 } from "circuit-json-to-kicad";
+import { computeStats } from "./board.js";
+import { extractEmbeddedDiagnostics } from "./diagnostics.js";
 import JSZip from "jszip";
 
 /** Segment de chemin sûr (session, projet). */
@@ -82,6 +84,24 @@ export async function exportFab(
     return { ok: false, message: "circuit-json vide : compilez d'abord via code_patch (aucun fichier fab inventé)" };
   }
   const cj = circuitJson as never[];
+  // T2 I7/I8 (#59) : mêmes gates que l'outil `fab_export` — refus explicite
+  // avant toute génération : erreurs embarquées (compile en erreur, ex
+  // resistor sans props) puis board vide (0 composant : jamais de gerbers
+  // silencieux). Pur sans I/O, sans import node:.
+  const embeddedErrors = extractEmbeddedDiagnostics(circuitJson);
+  if (embeddedErrors.some((d) => d.severity === "error")) {
+    const first = embeddedErrors.find((d) => d.severity === "error");
+    return {
+      ok: false,
+      message: `compile en erreur : ${(first?.message ?? "diagnostic embarqué").slice(0, 200)} — corrigez via code_patch avant tout export (aucun fichier fab inventé)`,
+    };
+  }
+  if (computeStats(circuitJson).components === 0) {
+    return {
+      ok: false,
+      message: "board vide (0 composant) : ajoutez au moins un composant via code_patch avant tout export (aucun gerber silencieux)",
+    };
+  }
   let gerberFiles: Record<string, string>;
   try {
     gerberFiles = convertCircuitJsonToGerberFiles(cj) as Record<string, string>;

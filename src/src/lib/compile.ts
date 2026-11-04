@@ -40,7 +40,9 @@ export interface CompileResult {
 export const CDN_BANNER =
   "CDN désactivé (disableCdnLoading) : toute pièce/empreinte non bundlée est indisponible hors-ligne.";
 
-/** Miroir frontend de l'extracteur sidecar (pcb-mcp/src/compile.ts, #39). */
+/** Miroir frontend de l'extracteur sidecar (pcb-mcp/src/compile.ts, #39).
+ *  T2 I9 (#59) : même regex stricte que le sidecar (suffixe _error/_warning,
+ *  la sous-chaîne nue — ex `error_report` — ne compte pas). */
 export function extractEmbeddedDiagnostics(circuitJson: unknown[]): Diagnostic[] {
   const out: Diagnostic[] = [];
   for (const raw of circuitJson ?? []) {
@@ -54,13 +56,13 @@ export function extractEmbeddedDiagnostics(circuitJson: unknown[]): Diagnostic[]
     const errorField = str("error_message") ?? str("error");
     const warningField = str("warning_message") ?? str("warning");
     const messageField = str("message");
-    if (lowered.includes("error") || errorField !== null) {
+    if (/(^|_)error$/.test(lowered) || errorField !== null) {
       out.push({
         severity: "error",
         message: errorField ?? messageField ?? JSON.stringify(raw).slice(0, 300),
         source: "circuit-json",
       });
-    } else if (lowered.includes("warning") || warningField !== null) {
+    } else if (/(^|_)warning$/.test(lowered) || warningField !== null) {
       out.push({
         severity: "warning",
         message: warningField ?? messageField ?? JSON.stringify(raw).slice(0, 300),

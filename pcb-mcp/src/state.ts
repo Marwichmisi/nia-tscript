@@ -38,7 +38,9 @@ export function getBoardState(sessionId = "default"): BoardState {
 }
 
 export function getHierarchy() {
-  return getHierarchyCore(projectBoardName());
+  // T2 I10 : dynamique depuis le TSX courant (miroir disque), board isolé
+  // au Projet ouvert (basename, jamais de lecture hors Projet).
+  return getHierarchyCore(projectBoardName(), "default", store.getCode());
 }
 
 /** Remet le store mémoire à la fixture (isolation des tests).
