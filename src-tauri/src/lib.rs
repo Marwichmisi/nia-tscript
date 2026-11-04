@@ -677,6 +677,7 @@ pub fn run() {
             llm::llm_status,
             llm::llm_verify_and_save,
             llm::llm_test,
+            llm::llm_models,
             llm::llm_clear,
             llm::llm_set_telemetry,
             llm::llm_complete

@@ -8,7 +8,7 @@
 //   le transport, normalisée avec les fonctions pures du cœur
 //   (`computeStats`, extracteur strict, recomptes) ;
 // - persistance = point de commit unique (`agent_commit_files`, atomique) ;
-// - Projet = projet courant backend (contexte relusu à chaque appel).
+// - Projet = Projet ouvert backend (contexte relu à chaque appel).
 // - réseau = proxy backend allowlisté (`agent_fetch`) — aucun appel réseau
 //   direct depuis le frontend, aucun Bearer/token dans ce chemin.
 //
@@ -22,6 +22,8 @@
 // `batch`, `fab`) sont donc re-séquencées ici à l'identique (mêmes appels
 // purs, mêmes gardes, même ordre snapshot→compile→gates→commit→rollback,
 // mêmes champs de sortie), le commit devenant l'unique point atomique.
+// Le partagé vit dans l'« orchestrateur » ci-dessous (`confinedProject`,
+// `commitProjectFile`, `recordCompile`).
 // Intègre T2 (#59) : gate route prioritaire (I12), refus board vide (I7),
 // timeout/abort search (I5), hiérarchie confinée dynamique (I10, par reuse).
 // La parité est vérifiée par `agent.test.ts` (même scénario, même stub,
@@ -400,6 +402,52 @@ export function createAgentRouter(transport: AgentTransport): AgentRouter {
     return assertProjectMember(p, registryOf(ctx));
   }
 
+  // --- Orchestrateur partagé des écritures (revue) ---------------------------
+  // Les 4 orchestrations avec écriture (`code_patch`, `live`, `batch`, `fab`)
+  // partagent garde Confinement, point de commit unique (atomique) et statut
+  // compile. Extraits ici (mêmes appels, mêmes gardes, même ordre
+  // snapshot→compile→gates→commit→rollback, mêmes champs de sortie) ;
+  // chaque orchestration garde sa logique propre (mutation, gates, export).
+  // Comportement inchangé, parité vérifiée par `agent.test.ts`.
+
+  /** Garde Confinement : Projet ouvert via le contexte relu à chaque appel. */
+  function confinedProject(tool: string): {
+    proj: string | null;
+    scopeErr: { message: string; code: string } | null;
+  } {
+    return requireConfinedProject(tool, {
+      resolveProject: () => ctx.project,
+      assertMember: assertMemberCached,
+    });
+  }
+
+  /** Point de commit unique : code + circuit-json via le backend (atomique).
+   *  En échec : log + message français ; l'appelant restaure son snapshot. */
+  async function commitProjectFile(
+    tool: string,
+    proj: string,
+    code: string,
+    circuitJson: unknown[],
+  ): Promise<{ ok: true } | { ok: false; message: string }> {
+    try {
+      await transport.commitFiles({ path: proj, code, circuitJson });
+      return { ok: true };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      store.appendLog("error", "compile", `${tool} disque KO : ${message}`);
+      return { ok: false, message };
+    }
+  }
+
+  /** Enregistre le dernier statut compile (reflet `pcb_state`, parité sidecar). */
+  function recordCompile(compiled: { errors: number; warnings: number }): void {
+    store.setLastCompile({
+      status: compiled.errors === 0 ? "ok" : "error",
+      errors: compiled.errors,
+      warnings: compiled.warnings,
+    });
+  }
+
   async function compileCore(
     code: string,
     opts?: { disableCdnLoading?: boolean },
@@ -483,9 +531,9 @@ export function createAgentRouter(transport: AgentTransport): AgentRouter {
       persist: () => {
         throw new Error("persistance via commitFiles (point unique), jamais via deps");
       },
-      // T2 I5 : le cœur propage un AbortSignal (timeout 15 s défaut) —
-      // honoré ici (le proxy backend coupe aussi à 15 s) pour que le timeout
-      // du cœur reste effectif même si `invoke` traînait.
+      // T2 I5 : le cœur propage un AbortSignal (timeout ≤ 15 s — 15 s pile :
+      // défaut cœur + proxy backend) — honoré ici pour que le timeout du
+      // cœur reste effectif même si `invoke` traînait.
       fetchFn: (async (url: string, init?: { signal?: AbortSignal }) => {
         const sig = init?.signal;
         if (sig?.aborted) throw new DOMException("aborted", "AbortError");
@@ -756,10 +804,7 @@ export function createAgentRouter(transport: AgentTransport): AgentRouter {
     return enqueue(async () => {
       await ensureLoaded();
       const sessionId = parsed.data.session_id ?? "default";
-      const { proj, scopeErr } = requireConfinedProject("code_patch", {
-        resolveProject: () => ctx.project,
-        assertMember: assertMemberCached,
-      });
+      const { proj, scopeErr } = confinedProject("code_patch");
       if (!proj || scopeErr) {
         const err = scopeErr ?? noProjectError("code_patch");
         return pack(
@@ -808,27 +853,16 @@ export function createAgentRouter(transport: AgentTransport): AgentRouter {
       const compiled = await compileCore(patched.code, {
         disableCdnLoading: parsed.data.disableCdnLoading,
       });
-      store.setLastCompile({
-        status: compiled.errors === 0 ? "ok" : "error",
-        errors: compiled.errors,
-        warnings: compiled.warnings,
-      });
+      recordCompile(compiled);
       if (compiled.errors === 0) {
-        try {
-          await transport.commitFiles({
-            path: proj,
-            code: patched.code,
-            circuitJson: compiled.circuitJson,
-          });
-        } catch (e) {
-          const message = e instanceof Error ? e.message : String(e);
-          store.appendLog("error", "compile", `code_patch disque KO : ${message}`);
+        const committed = await commitProjectFile("code_patch", proj, patched.code, compiled.circuitJson);
+        if (!committed.ok) {
           return pack({
             sessionId,
             applied: false as const,
             ready: false,
             stats: compiled.stats,
-            diagnostics: [{ severity: "error", message, source: "code_patch" }],
+            diagnostics: [{ severity: "error", message: committed.message, source: "code_patch" }],
             mode: "echec",
             banner: compiled.banner,
             errors: 1,
@@ -883,10 +917,7 @@ export function createAgentRouter(transport: AgentTransport): AgentRouter {
     if (!parsed.success) throw invalidArgs("live_manage", parsed.error.message);
     const run = async (): Promise<ToolResult<unknown>> => {
       await ensureLoaded();
-      const { proj: projLive, scopeErr: scopeErrLive } = requireConfinedProject(
-        "live_manage",
-        { resolveProject: () => ctx.project, assertMember: assertMemberCached },
-      );
+      const { proj: projLive, scopeErr: scopeErrLive } = confinedProject("live_manage");
       if (!projLive || scopeErrLive) {
         const err = scopeErrLive ?? noProjectError("live_manage");
         return pack(
@@ -1054,30 +1085,19 @@ export function createAgentRouter(transport: AgentTransport): AgentRouter {
         disableCdnLoading: parsed.data.disableCdnLoading,
       });
       const ready = compiled.errors === 0;
-      store.setLastCompile({
-        status: compiled.errors === 0 ? "ok" : "error",
-        errors: compiled.errors,
-        warnings: compiled.warnings,
-      });
+      recordCompile(compiled);
       if (compiled.errors === 0) {
-        try {
-          await transport.commitFiles({
-            path: projLive,
-            code: mutated.code,
-            circuitJson: compiled.circuitJson,
-          });
-        } catch (e) {
-          const message = e instanceof Error ? e.message : String(e);
-          store.appendLog("error", "compile", `live_manage disque KO : ${message}`);
+        const committed = await commitProjectFile("live_manage", projLive, mutated.code, compiled.circuitJson);
+        if (!committed.ok) {
           return pack({
             sessionId, op: asked, applied: false as const, ready: false,
             stats: compiled.stats,
-            diagnostics: [{ severity: "error", message, source: "live_manage" }],
+            diagnostics: [{ severity: "error", message: committed.message, source: "live_manage" }],
             mode: "echec", banner: compiled.banner,
             errors: 1, warnings: compiled.warnings, circuitJsonLength: 0,
             circuitJson: [] as unknown[],
             code: mutated.code, selection: null,
-            views: null as string[] | null, message,
+            views: null as string[] | null, message: committed.message,
           });
         }
         store.setCode(mutated.code);
@@ -1117,10 +1137,7 @@ export function createAgentRouter(transport: AgentTransport): AgentRouter {
     return enqueue(async () => {
       await ensureLoaded();
       const sessionId = parsed.data.session_id ?? "default";
-      const { proj: projBatch, scopeErr: scopeErrBatch } = requireConfinedProject(
-        "batch_execute",
-        { resolveProject: () => ctx.project, assertMember: assertMemberCached },
-      );
+      const { proj: projBatch, scopeErr: scopeErrBatch } = confinedProject("batch_execute");
       if (!projBatch || scopeErrBatch) {
         const err = scopeErrBatch ?? noProjectError("batch_execute");
         return pack(
@@ -1268,22 +1285,15 @@ export function createAgentRouter(transport: AgentTransport): AgentRouter {
         "info", "compile",
         `batch_execute ok : ${ops.length} ops, ${compiled.stats.total} éléments, 0 erreur`,
       );
-      try {
-        await transport.commitFiles({
-          path: projBatch,
-          code: batched.code,
-          circuitJson: compiled.circuitJson,
-        });
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        store.appendLog("error", "compile", `batch_execute disque KO : ${message}`);
+      const committed = await commitProjectFile("batch_execute", projBatch, batched.code, compiled.circuitJson);
+      if (!committed.ok) {
         store.restore(snap);
         const ready = store.getBoardState(boardBaseName(ctx.project), sessionId).ready;
         return pack({
           sessionId, applied: false as const, ready,
           failedOpIndex: null as number | null, rolledBack: true,
           stats: compiled.stats,
-          diagnostics: [{ severity: "error", message, source: "batch_execute" }],
+          diagnostics: [{ severity: "error", message: committed.message, source: "batch_execute" }],
           mode: "echec", banner: compiled.banner,
           errors: 1, warnings: compiled.warnings,
           circuitJsonLength: 0, circuitJson: [] as unknown[],
@@ -1312,10 +1322,7 @@ export function createAgentRouter(transport: AgentTransport): AgentRouter {
     if (!parsed.success) throw invalidArgs("fab_export", parsed.error.message);
     await ensureLoaded();
     const sessionId = parsed.data.session_id ?? "default";
-    const { proj: projFab, scopeErr: scopeErrFab } = requireConfinedProject("fab_export", {
-      resolveProject: () => ctx.project,
-      assertMember: assertMemberCached,
-    });
+    const { proj: projFab, scopeErr: scopeErrFab } = confinedProject("fab_export");
     if (!projFab || scopeErrFab) {
       const err = scopeErrFab ?? noProjectError("fab_export");
       return pack(

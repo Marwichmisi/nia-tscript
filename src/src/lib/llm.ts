@@ -57,6 +57,13 @@ export async function llmClear(): Promise<boolean> {
   return (await invoke("llm_clear")) as boolean;
 }
 
+/** Liste live des modèles (`GET /v1/models` via allowlist, coût nul).
+ *  Exige Projet ouvert + clé (G3) ; en échec, le sélecteur garde le repli
+ *  codé (`loadModelList` ne throw jamais vers l'UI). */
+export async function llmModels(): Promise<string[]> {
+  return (await invoke("llm_models")) as string[];
+}
+
 /** Télémétrie d'usage : opt-in explicite (défaut `false`, G8). */
 export async function llmSetTelemetry(optin: boolean): Promise<LlmStatus> {
   return (await invoke("llm_set_telemetry", { optin })) as LlmStatus;

@@ -7,6 +7,7 @@
 // tamponnée pour traçabilité.
 
 import { BatchExecuteInput } from "../../../pcb-mcp/src/tools-core/schemas";
+import type { z } from "zod";
 
 /** Version du seam AgentChat (schémas + protocole de lot). */
 export const AGENT_CHAT_SCHEMA_VERSION = 1;
@@ -17,4 +18,4 @@ export const BATCH_EXECUTE_TOOL_NAME = "batch_execute" as const;
 /** Schéma d'entrée du tool (réutilisé du cœur : parité MCP/routeur). */
 export const BatchExecuteToolInput = BatchExecuteInput;
 
-export type BatchExecuteToolInput = typeof BatchExecuteInput._type;
+export type BatchExecuteToolInput = z.output<typeof BatchExecuteInput>;

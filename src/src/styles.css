@@ -1374,17 +1374,6 @@ code {
   margin-top: 2px;
 }
 
-.agent-attach {
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--muted-fg);
-  border-radius: 50%;
-  width: 26px;
-  height: 26px;
-  cursor: not-allowed;
-  flex: none;
-}
-
 .agent-pill {
   border: none;
   background: transparent;

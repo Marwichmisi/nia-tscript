@@ -13,17 +13,19 @@ import { buildInstructions } from "./prompt";
 import {
   createBatchExecuteTool,
   type ApprovalGate,
-  type BatchExecutor,
+  type LotExecutor,
 } from "./tools";
 import type { ApprovalMode } from "./store";
 
 export interface AgentPiecesDeps {
   model: LanguageModel;
   gate: ApprovalGate;
-  execute: BatchExecutor;
+  execute: LotExecutor;
   getMode: () => ApprovalMode;
   boardSummary: string;
   compactionNotes?: string[];
+  /** `false` = modèle sans tool-calling (US10) : aucun tool offert, texte seul. */
+  toolsSupported?: boolean;
 }
 
 /** UN agent, deux pilotes (generate déterministe / Chat streaming). */
@@ -32,15 +34,18 @@ export function createLoopAgent(deps: AgentPiecesDeps) {
     buildInstructions({ boardSummary: deps.boardSummary }),
     ...(deps.compactionNotes ?? []).map((n) => `[contexte compacté] ${n}`),
   ].join("\n\n");
+  // US10 : modèle sans tool-calling → aucun tool offert (texte seul explicite).
+  const tools: Record<string, ReturnType<typeof createBatchExecuteTool>> = {};
+  if (deps.toolsSupported !== false) {
+    tools.batch_execute = createBatchExecuteTool({
+      gate: deps.gate,
+      execute: deps.execute,
+      getMode: deps.getMode,
+    });
+  }
   return new ToolLoopAgent({
     model: deps.model,
-    tools: {
-      batch_execute: createBatchExecuteTool({
-        gate: deps.gate,
-        execute: deps.execute,
-        getMode: deps.getMode,
-      }),
-    },
+    tools,
     instructions,
     stopWhen: stepCountIs(5),
   });

@@ -1,4 +1,4 @@
-// Board fixture R1/R2+U1 — même TSX que le sidecar pcb-mcp (write-through).
+// Gabarit démo R1/R2+U1 — même TSX que le sidecar pcb-mcp (write-through).
 // Le TSX reste la seule source de vérité ; la WebView ne fait que l'afficher.
 
 export const BOARD_CODE = `export default () => (

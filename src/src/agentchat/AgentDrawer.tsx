@@ -1,6 +1,6 @@
 // Tiroir Agent intégré — variante B validée (maquette #54 réécrite en
 // propre) : preview pleine largeur, tiroir droit repliable, barre unifiée
-// (input + [+] + pills mode/modèle + envoi), Terminal bas inchangé.
+// (input + pills mode/modèle + envoi), Terminal bas inchangé.
 //
 // Ce composant ne parle qu'au hook `useAgentChat` (seam étroit) — jamais
 // au SDK en direct. 1 approval = 1 lot (ApprovalCard), suppression Projet
@@ -63,7 +63,7 @@ function LotBadge({ lot }: { lot: NonNullable<ChatMessage["lot"]> }) {
   );
 }
 
-function Thread({
+function Conversation({
   messages,
   partial,
   onStarter,
@@ -126,7 +126,7 @@ export function AgentDrawer({ projectPath, keyConfigured, onOpenSettings, onClos
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
-  const busy = chat.working;
+  const busy = chat.working || chat.loading;
   const blocked = chat.needsConsent || !keyConfigured;
   const canSend = draft.trim().length > 0 && !busy && !blocked;
   const canResume =
@@ -206,13 +206,19 @@ export function AgentDrawer({ projectPath, keyConfigured, onOpenSettings, onClos
         </div>
       )}
 
+      {chat.loading && (
+        <div className="agent-banner agent-banner-info" role="status">
+          Chargement de la Conversation chiffrée…
+        </div>
+      )}
+
       {chat.degraded && (
         <div className="agent-banner agent-banner-warn" role="status">
           <strong>Dégradé :</strong> {chat.degraded}
         </div>
       )}
 
-      <Thread messages={chat.messages} partial={chat.partial} onStarter={(s) => chat.send(s)} />
+      <Conversation messages={chat.messages} partial={chat.partial} onStarter={(s) => chat.send(s)} />
 
       {chat.pending.length > 0 && (
         <div className="agent-approval" role="alertdialog" aria-label="Approbation requise pour le lot">
@@ -280,27 +286,19 @@ export function AgentDrawer({ projectPath, keyConfigured, onOpenSettings, onClos
             }
           }}
           placeholder={
-            !keyConfigured
-              ? "Agent en pause — colle ta clé dans Paramètres…"
-              : chat.needsConsent
-                ? "Valide le récapitulatif ci-dessus pour commencer…"
-                : "Message — ex. déplace R1 de 2 mm (Entrée = envoyer)"
+            chat.loading
+              ? "Chargement de la Conversation chiffrée…"
+              : !keyConfigured
+                ? "Agent en pause — colle ta clé dans Paramètres…"
+                : chat.needsConsent
+                  ? "Valide le récapitulatif ci-dessus pour commencer…"
+                  : "Message — ex. déplace R1 de 2 mm (Entrée = envoyer)"
           }
           aria-label="Message à l'agent"
           className="agent-input"
           disabled={busy || blocked}
         />
         <div className="agent-composer-row">
-          <button
-            type="button"
-            className="agent-attach"
-            title="Joindre une pièce — non supporté en V1 (inutile pour la carte)"
-            disabled
-            aria-disabled="true"
-            tabIndex={-1}
-          >
-            +
-          </button>
           <select
             value={chat.mode}
             onChange={(e) => chat.setMode(e.target.value as "manuel" | "auto")}
@@ -319,7 +317,7 @@ export function AgentDrawer({ projectPath, keyConfigured, onOpenSettings, onClos
             aria-label="Modèle Meta"
             title={
               chat.modelsFallback
-                ? "Liste live indisponible en T6 (repli codé, voir module models.ts) — switch mid-conversation sans perte, historique partagé"
+                ? "Liste live indisponible (repli codé, voir module models.ts) — switch mid-conversation sans perte, historique partagé"
                 : "Modèle Meta — switch mid-conversation sans perte"
             }
             className="agent-pill"

@@ -5,12 +5,13 @@ import { describe, expect, test, vi } from "vitest";
 import {
   createApprovalGate,
   createBatchExecuteTool,
-  type BatchExecutionOutcome,
+  type LotOutcome,
 } from "./tools";
+import type { BatchExecuteToolInput } from "./schemas";
 
-const LOT = { operations: [{ kind: "move", refdes: "R1", x: 1, y: 2 }] };
+const LOT: BatchExecuteToolInput = { operations: [{ kind: "move", refdes: "R1", x: 1, y: 2 }] };
 
-function okOutcome(): BatchExecutionOutcome {
+function okOutcome(): LotOutcome {
   return { applied: true, rolledBack: false, errors: 0, message: "lot appliqué", code: null };
 }
 
@@ -52,7 +53,7 @@ describe("batch_execute + approbation", () => {
 
   test("rollback visible en échec (applied:false, rolledBack:true, message)", async () => {
     const gate = createApprovalGate();
-    const exec = vi.fn(async (): Promise<BatchExecutionOutcome> => ({
+    const exec = vi.fn(async (): Promise<LotOutcome> => ({
       applied: false,
       rolledBack: true,
       errors: 1,

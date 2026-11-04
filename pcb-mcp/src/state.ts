@@ -1,4 +1,4 @@
-// État lecture seule (fixtures MVP, mono-board) + store TSX write-through (#12).
+// État lecture seule (gabarits démo MVP, mono-board) + store TSX write-through (#12).
 // HÔTE T1 (#56) : la mémoire pure vit dans tools-core/store.ts (singleton
 // ci-dessous, même objet partagé) ; ce module garde la SEULE résolution
 // Projet (lockfile → nom de board via `currentProjectPath`, injectée au cœur
@@ -43,10 +43,10 @@ export function getHierarchy() {
   return getHierarchyCore(projectBoardName(), "default", store.getCode());
 }
 
-/** Remet le store mémoire à la fixture (isolation des tests).
+/** Remet le store mémoire au gabarit démo (isolation des tests).
  *  Ne crée JAMAIS de Projet sur disque (ticket #38) : sans Projet ouvert
  *  explicite, les outils gated répondent le vrai `NO_PROJECT_OPEN`
- *  (fini la fixture démo masquante). Les suites qui ont besoin d'un Projet
+ *  (fini le gabarit démo masquant). Les suites qui ont besoin d'un Projet
  *  l'ouvrent explicitement (cf. `pcb-mcp/test/helpers.ts`). */
 export function resetStoreForTests(): void {
   store.reset();

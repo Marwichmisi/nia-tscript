@@ -30,6 +30,9 @@ export interface LotOutcomeSummary {
 
 export interface Conversation {
   version: number;
+  /** Identifiant stable : isole l'état par Conversation (sessionId généralisé,
+   *  persisté, régénéré si absent). Une Conversation = un Projet ouvert. */
+  id: string;
   projectPath: string;
   model: string;
   mode: ApprovalMode;
@@ -50,6 +53,27 @@ export function conversationKey(projectPath: string): string {
   return `nia.agentchat.${projectPath}`;
 }
 
+/** Identifiant de session généralisé : UNE source (l'id de Conversation). */
+export function conversationSessionId(conv: Conversation): string {
+  return conv.id;
+}
+
+let convCounter = 0;
+
+/** Identifiant stable de Conversation (sans `node:`, WebView + tests). */
+export function newConversationId(): string {
+  const uuid = (globalThis.crypto as Crypto | undefined)?.randomUUID?.bind(globalThis.crypto);
+  if (typeof uuid === "function") {
+    try {
+      return uuid();
+    } catch {
+      // Repli compteur ci-dessous.
+    }
+  }
+  convCounter += 1;
+  return `conv-${Date.now().toString(36)}-${convCounter}-${Math.floor(Math.random() * 0xffffff).toString(36)}`;
+}
+
 /** Estimation locale des jetons (≈ caractères / 4, même base que le backend). */
 export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
@@ -65,6 +89,7 @@ export const COMPACTION_RATIO = 0.8;
 export function newConversation(projectPath: string, model: string): Conversation {
   return {
     version: AGENT_CHAT_SCHEMA_VERSION,
+    id: newConversationId(),
     projectPath,
     model,
     mode: "manuel",
@@ -82,6 +107,7 @@ export function loadConversation(store: StorageLike, projectPath: string): Conve
     if (!parsed || !Array.isArray(parsed.messages)) return newConversation(projectPath, "");
     return {
       version: AGENT_CHAT_SCHEMA_VERSION,
+      id: typeof parsed.id === "string" && parsed.id ? parsed.id : newConversationId(),
       projectPath,
       model: typeof parsed.model === "string" ? parsed.model : "",
       mode: parsed.mode === "auto" ? "auto" : "manuel",

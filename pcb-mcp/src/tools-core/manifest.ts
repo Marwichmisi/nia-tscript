@@ -45,7 +45,7 @@ export const TOOL_DEFS = {
         annotations: { readOnlyHint: true, destructiveHint: false },
       },
   project_current: {
-        title: "Projet courant",
+        title: "Projet ouvert",
         description: "Retourne le Projet ouvert ou null si Accueil. Accessible sans Projet ouvert.",
         inputSchema: z.object({}),
         outputSchema: z.object({ current: z.string().nullable() }),

@@ -14,7 +14,7 @@ import { tool } from "ai";
 import { BATCH_EXECUTE_TOOL_NAME, BatchExecuteToolInput } from "./schemas";
 import type { ApprovalMode } from "./store";
 
-export interface BatchExecutionOutcome {
+export interface LotOutcome {
   applied: boolean;
   rolledBack: boolean;
   errors: number;
@@ -23,10 +23,10 @@ export interface BatchExecutionOutcome {
 }
 
 /** Exécuteur injecté (prod : routeur T5 ; tests : double). */
-export type BatchExecutor = (input: {
+export type LotExecutor = (input: {
   operations: unknown[];
   sessionId?: string;
-}) => Promise<BatchExecutionOutcome>;
+}) => Promise<LotOutcome>;
 
 export interface PendingApproval {
   toolCallId: string;
@@ -104,14 +104,14 @@ export function createApprovalGate(): ApprovalGate {
 
 const ALLOWED_KINDS = new Set(["patch", "move", "rotate", "swap_package", "reassign_net", "route"]);
 
-export interface BatchToolDeps {
+export interface LotToolDeps {
   gate: ApprovalGate;
-  execute: BatchExecutor;
+  execute: LotExecutor;
   getMode: () => ApprovalMode;
 }
 
 /** Le tool SDK (schéma Zod du cœur, validé côté SDK + revérifié ici). */
-export function createBatchExecuteTool(deps: BatchToolDeps) {
+export function createBatchExecuteTool(deps: LotToolDeps) {
   return tool({
     description:
       "Applique UN lot atomique d'opérations carte (patch/move/rotate/swap_package/reassign_net/route) en une seule compile avec rollback. 1 approval = 1 lot.",
