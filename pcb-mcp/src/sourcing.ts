@@ -26,6 +26,8 @@ export interface SearchPartsOptions {
   limit?: number;
   disableCdnLoading?: boolean;
   fetchFn?: FetchFn;
+  /** Timeout injecté (T2 I5) : défaut 15 s côté cœur. */
+  timeoutMs?: number;
 }
 
 /** Wrapper hôte : injecte le `fetch` global quand l'appelant n'en fournit
@@ -40,5 +42,6 @@ export function searchParts(
     limit: opts?.limit,
     disableCdnLoading: opts?.disableCdnLoading,
     fetchFn: opts?.fetchFn ?? fetch,
+    timeoutMs: opts?.timeoutMs,
   });
 }

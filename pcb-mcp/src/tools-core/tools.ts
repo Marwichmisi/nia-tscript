@@ -36,7 +36,6 @@ import type { ToolsDeps } from "./deps.js";
 export { requireConfinedProject } from "./guards.js";
 import { noProjectError, requireConfinedProject } from "./guards.js";
 import {
-  NO_PROJECT_OPEN,
   upsertRegistry,
 } from "./project-core.js";
 import {
@@ -211,8 +210,16 @@ export async function runLogsRead(deps: ToolsDeps, args: LogsReadArgs): Promise<
 
 /** Ressource hiérarchie (miroir lecture) : payload JSON textuel. */
 export function readHierarchy(deps: ToolsDeps): { json: unknown; text: string } {
-  const proj = deps.resolveProject();
-  const json = proj ? getHierarchyCore(deps.boardName()) : { error: NO_PROJECT_OPEN };
+  // T2 I10 (#59) : Confinement comme les lectures — hors périmètre, aucune
+  // lecture du Projet (ni board ni composants). Le board est isolé via
+  // `boardName()` (basename du Projet ouvert, jamais de lecture hors Projet).
+  const { proj, scopeErr } = requireConfinedProject("hierarchy", deps);
+  if (!proj || scopeErr) {
+    const err = scopeErr ?? noProjectError("hierarchy");
+    const json = { error: err.code, message: err.message };
+    return { json, text: JSON.stringify(json) };
+  }
+  const json = getHierarchyCore(deps.boardName(), "default", deps.store.getCode());
   return { json, text: JSON.stringify(json) };
 }
 
@@ -911,6 +918,48 @@ export async function runBatchExecute(
   }
   deps.store.setCode(batched.code);
   const compiled = await deps.compile(batched.code, { disableCdnLoading: args.disableCdnLoading });
+  // T2 I12 (#59) : motif du gate prioritaire sur les diagnostics compile.
+  // Si le lot contient une op `route` et que le gate placement bloque (ou
+  // que le board n'est pas routé), la sortie porte
+  // `routing refusé : <blockReason>` même quand la compile est en erreur —
+  // jamais noyée sous les diagnostics compile. Runner en échec (exception,
+  // aucun circuit-json) : pas de gate évaluable, on garde le chemin erreur.
+  if (ops.some((o) => o.kind === "route") && compiled.mode !== "echec") {
+    const gatePre = await checks.runPlacementGate(compiled.circuitJson, batched.code);
+    const preBlock = !gatePre.routingAllowed
+      ? (gatePre.blockReason ?? "placement non vert")
+      : !isBoardRouted(compiled.circuitJson)
+        ? "board non routé : aucune pcb_trace avec route dans le circuit-json — vérifiez le placement puis relancez"
+        : null;
+    if (preBlock) {
+      deps.store.restore(snap);
+      const ready = deps.store.getBoardState(deps.boardName(), sessionId).ready;
+      const output = {
+        sessionId,
+        applied: false as const,
+        ready,
+        failedOpIndex: null as number | null,
+        rolledBack: true,
+        stats: emptyStats(),
+        diagnostics: [
+          { severity: "error", message: `routing refusé : ${preBlock}`, source: "batch_execute" },
+        ],
+        mode: "echec",
+        banner: compiled.banner,
+        errors: 1,
+        warnings: compiled.warnings,
+        circuitJsonLength: 0,
+        circuitJson: [] as unknown[],
+        code: snap.code,
+      };
+      deps.log(
+        "error",
+        "compile",
+        `batch_execute rollback : routing refusé — ${preBlock}`,
+      );
+      return pack(output);
+    }
+  }
   if (compiled.errors !== 0) {
     deps.store.restore(snap);
     const ready = deps.store.getBoardState(deps.boardName(), sessionId).ready;
@@ -1069,13 +1118,17 @@ export async function runSearchParts(
     };
     return pack(output);
   }
+  // T2 I5 (#59) : progression explicite via les logs (début + durée) —
+  // `logs_read` montre que la recherche avance au lieu de sembler bloquée.
+  const t0 = Date.now();
+  deps.log("info", "export", `search_parts "${(args.query ?? "").trim()}" : recherche JLCPCB en cours (timeout 15 s)…`);
   const found = await searchPartsCore(args.query ?? "", {
     limit: args.limit ?? 5,
     disableCdnLoading: args.disableCdnLoading,
     fetchFn: deps.fetchFn,
   });
   if (!found.ok) {
-    deps.log("error", "export", `search_parts "${args.query ?? ""}" impossible : ${found.message}`);
+    deps.log("error", "export", `search_parts "${args.query ?? ""}" impossible en ${Date.now() - t0} ms : ${found.message}`);
     const output = {
       sessionId,
       query: found.query,
@@ -1092,7 +1145,7 @@ export async function runSearchParts(
   deps.log(
     "info",
     "export",
-    `search_parts "${found.query}" : ${found.results.length} résultat(s) JLCPCB`,
+    `search_parts "${found.query}" : ${found.results.length} résultat(s) JLCPCB en ${Date.now() - t0} ms`,
   );
   const output = {
     sessionId,
@@ -1192,6 +1245,15 @@ export async function runFabExport(
       exportDir: "",
       message: `compile en erreur : ${compiled.diagnostics[0]?.message ?? "inconnu"} — corrigez via code_patch avant tout export`,
     };
+    return pack(output);
+  }
+  // T2 I7 (#59) : Projet vide (0 composant) → refus explicite avant tout
+  // gate DRC/routage (qui seraient verts sur un board vide). Jamais de
+  // gerbers silencieux : même message que le cœur `exportFab` pur.
+  if (compiled.stats.components === 0) {
+    const reason = "board vide (0 composant) : ajoutez au moins un composant via code_patch avant tout export";
+    deps.log("error", "export", `fab_export refusé : ${reason}`);
+    const output = emptyFabOutput(reason);
     return pack(output);
   }
   // Gate board routé (#44) : le routage déclaré interdit

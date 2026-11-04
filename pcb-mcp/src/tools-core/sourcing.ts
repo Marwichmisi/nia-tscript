@@ -160,6 +160,10 @@ export interface SearchPartsOptions {
   /** Injecté par l'hôte (sidecar : `fetch` global ; jamais d'accès réseau
    *  direct dans le cœur). Requis : sans lui, erreur explicite. */
   fetchFn: FetchFn;
+  /** Timeout de la recherche (T2 I5, #59) : défaut 15 s (audit : 13,6 s
+   *  réels sans timeout, outil bloqué). Injecté par l'hôte en ms ; les
+   *  tests passent une valeur courte. */
+  timeoutMs?: number;
 }
 
 interface JlcComponent {
@@ -277,9 +281,16 @@ export async function searchParts(
   }
   const limit = Math.min(Math.max(opts?.limit ?? 5, 1), 10);
   const doFetch = opts.fetchFn;
+  // T2 I5 (#59) : timeout explicite — l'outil ne reste jamais bloqué
+  // (audit : 13,6 s réels sans timeout). AbortController pur (pas de
+  // node:), signal propagé à chaque fetch (recherche + enrichissements).
+  const timeoutMs = opts?.timeoutMs ?? 15000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const signal = controller.signal;
   let components: JlcComponent[];
   try {
-    const res = await doFetch(`${JLCSEARCH_BASE}/api/search?q=${encodeURIComponent(q)}`);
+    const res = await doFetch(`${JLCSEARCH_BASE}/api/search?q=${encodeURIComponent(q)}`, { signal });
     if (res.status === 429) {
       return {
         ok: false,
@@ -329,7 +340,7 @@ export async function searchParts(
         ok: false,
         query: q,
         tsciSearch,
-        message: `recherche JLCPCB interrompue (timeout) pour "${q}" : réseau trop lent ou jointure coupée — réessayez, ou ${tsciSearch}`,
+        message: `recherche JLCPCB interrompue (timeout ${Math.round(timeoutMs / 1000)} s) pour "${q}" : réseau trop lent ou jointure coupée — réessayez, ou ${tsciSearch}`,
         banner: null,
       };
     }
@@ -364,7 +375,7 @@ export async function searchParts(
     // Stock parfois null sur /api/search : enrichi via components/list.json.
     if (stock === null) {
       try {
-        const sr = await doFetch(`${JLCSEARCH_BASE}/components/list.json?search=${lcsc}`);
+        const sr = await doFetch(`${JLCSEARCH_BASE}/components/list.json?search=${lcsc}`, { signal });
         if (sr.ok) {
           const sb = (await sr.json()) as { components?: JlcComponent[] };
           const match = (Array.isArray(sb.components) ? sb.components : []).find(
@@ -380,7 +391,7 @@ export async function searchParts(
     // Empreinte : footprinter_strings d'abord (cuivre IoU ≥ 95 %), fallback package.
     let footprinterString: string | null = null;
     try {
-      const fr = await doFetch(`${JLCSEARCH_BASE}/api/footprinter_strings/${lcsc}`);
+      const fr = await doFetch(`${JLCSEARCH_BASE}/api/footprinter_strings/${lcsc}`, { signal });
       if (fr.ok) {
         const fb = (await fr.json()) as {
           component_footprinter_details?: { footprinter_string?: unknown };
@@ -407,6 +418,7 @@ export async function searchParts(
     });
   }
   if (results.length === 0) {
+    clearTimeout(timer);
     return {
       ok: true,
       query: q,
@@ -417,5 +429,6 @@ export async function searchParts(
         `précisez valeur + package (ex 10k 0402) ou une réf LCSC directe (ex C21190), ou ${tsciSearch}`,
     };
   }
+  clearTimeout(timer);
   return { ok: true, query: q, tsciSearch, results, message: null };
 }

@@ -32,40 +32,90 @@ export interface HierarchyComponent {
   pins: HierarchyPin[];
 }
 
-export function getHierarchy(boardName = "board", sessionId = "default") {
+export function getHierarchy(boardName = "board", sessionId = "default", code = "") {
   return {
     board: boardName,
     sessionId,
     modules: [
       {
         name: "top",
-        components: [
-          {
-            refdes: "R1",
-            pkg: "0402",
-            value: "10k",
-            rotation: 0,
-            nets: ["3V3", "GND"],
-            pins: [
-              { pin: "1", net: "3V3" },
-              { pin: "2", net: "GND" },
-            ],
-          } satisfies HierarchyComponent,
-          {
-            refdes: "C1",
-            pkg: "0603",
-            value: "100nF",
-            rotation: 90,
-            nets: ["3V3", "GND"],
-            pins: [
-              { pin: "1", net: "3V3" },
-              { pin: "2", net: "GND" },
-            ],
-          } satisfies HierarchyComponent,
-        ],
+        components: parseHierarchyComponents(code),
       },
     ],
   };
+}
+
+/** Composants du TSX courant (T2 I10, #59) : plus de fixture — la
+ *  hiérarchie reflète le code en mémoire (miroir du disque). Balises
+ *  feuille portant un name="..." + nets/pins issus des <trace>. */
+function parseHierarchyComponents(code: string): HierarchyComponent[] {
+  const out: HierarchyComponent[] = [];
+  const tagRe = /<(?:resistor|capacitor|inductor|diode|led|chip|transistor|crystal|jumper|testpoint|pinheader|resonator|pushbutton|switch|potentiometer|transformer|fuse|mosfet)\b[^>]*>/gi;
+  const strProp = (tag: string, prop: string): string | null => {
+    const m = tag.match(new RegExp(`\\b${prop}\\s*=\\s*"([^"]*)"`));
+    return m?.[1] ?? null;
+  };
+  const numProp = (tag: string, prop: string): number | null => {
+    const m = tag.match(new RegExp(`\\b${prop}\\s*=\\s*\\{([^}]*)\\}`));
+    if (!m) return null;
+    const n = Number(m[1]);
+    return Number.isFinite(n) ? n : null;
+  };
+  const traceTags: string[] = [];
+  const traceRe = /<trace\b[^>]*>/gi;
+  for (const m of (code ?? "").matchAll(traceRe)) traceTags.push(m[0]);
+  const endpoint = (tag: string, side: "from" | "to"): string | null =>
+    tag.match(new RegExp(`\\b${side}\\s*=\\s*"([^"]+)"`))?.[1] ?? null;
+  const netOf = (ep: string): string | null =>
+    ep.match(/net\.([A-Za-z0-9_+-]+)/)?.[1] ?? null;
+
+  for (const m of (code ?? "").matchAll(tagRe)) {
+    const tag = m[0];
+    const name = tag.match(/\bname\s*=\s*"([^"]+)"/)?.[1];
+    if (!name) continue;
+    const pkg = strProp(tag, "footprint") ?? strProp(tag, "pkg") ?? "";
+    const value =
+      strProp(tag, "resistance") ??
+      strProp(tag, "capacitance") ??
+      strProp(tag, "inductance") ??
+      strProp(tag, "value") ??
+      "";
+    const rotation = numProp(tag, "pcbRotation") ?? 0;
+    const nets = new Set<string>();
+    const pinsByName = new Map<string, string>();
+    const refRe = new RegExp(`\\.${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_])`);
+    for (const t of traceTags) {
+      const from = endpoint(t, "from");
+      const to = endpoint(t, "to");
+      if (from === null || to === null) continue;
+      for (const side of [from, to] as const) {
+        if (!refRe.test(side)) continue;
+        const pin = side.match(
+          new RegExp(
+            `\\.${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*>\\s*\\.([A-Za-z0-9_]+)`,
+          ),
+        )?.[1];
+        const other = side === from ? to : from;
+        const net = netOf(other) ?? netOf(side);
+        if (net) nets.add(net);
+        if (pin && !pinsByName.has(pin)) pinsByName.set(pin, net ?? "");
+        else if (pin && net && !pinsByName.get(pin)) pinsByName.set(pin, net);
+      }
+    }
+    out.push({
+      refdes: name,
+      pkg,
+      value,
+      rotation,
+      nets: [...nets].sort(),
+      pins: [...pinsByName.entries()]
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([pin, net]) => ({ pin, net })),
+    });
+  }
+  out.sort((a, b) => (a.refdes < b.refdes ? -1 : a.refdes > b.refdes ? 1 : 0));
+  // Déduplique sur refdes (name unique imposé par le format §8).
+  return out.filter((c, i) => i === 0 || c.refdes !== out[i - 1]!.refdes);
 }
 
 export interface LogEntry {
