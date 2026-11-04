@@ -157,13 +157,20 @@ describe("revue #37 item 7 — écrivains sidecar via helpers atomiques seuls", 
       .filter((f) => f.endsWith(".ts"))
       .filter((f) => /writeFileSync|appendFileSync/.test(readSrc(f)))
       .sort();
-    expect(writers).toEqual(["log.ts", "mcp.ts", "preview.ts", "project.ts"]);
+    // T1 (#56) : l'écrivain direct d'exports a déménagé de l'adaptateur
+    // `mcp.ts` (devenu fin, zéro écriture) vers le câblage hôte `deps.ts`
+    // (FabIo.writeFile injecté au cœur) — sémantique inchangée (exports seuls).
+    expect(writers).toEqual(["deps.ts", "log.ts", "preview.ts", "project.ts"]);
     // project.ts : le seul write direct est le tmp de l'helper atomique.
     const project = readSrc("project.ts");
     expect(project.match(/writeFileSync/g)?.length).toBe(1);
     expect(project.indexOf("export function atomicWriteFileSync")).toBeLessThan(
       project.indexOf("fs.writeFileSync(fd, content)"),
     );
+    // deps.ts : le seul write direct est l'écrivain fab injecté (exports seuls).
+    const deps = readSrc("deps.ts");
+    expect(deps.match(/writeFileSync/g)?.length).toBe(1);
+    expect(deps.indexOf("writeFile: (p, content)")).toBeGreaterThanOrEqual(0);
   });
 
   test("Registre/lockfile/Projet persistés uniquement via helpers atomiques", () => {
@@ -176,7 +183,7 @@ describe("revue #37 item 7 — écrivains sidecar via helpers atomiques seuls", 
       expect(body, fn).toContain("atomicWriteFileSync");
     }
     // Chemins résolus uniquement dans project.ts (pas de contournement).
-    for (const f of ["mcp.ts", "state.ts", "server.ts", "http.ts", "queue.ts", "log.ts"]) {
+    for (const f of ["mcp.ts", "state.ts", "server.ts", "http.ts", "queue.ts", "log.ts", "deps.ts"]) {
       expect(readSrc(f), f).not.toMatch(/registryPath\(\)|lockfilePath\(\)/);
     }
   });

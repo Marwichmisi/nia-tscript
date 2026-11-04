@@ -1,4 +1,6 @@
 // Store screenshots agent (ticket #15) : PNG base64 par source + lien preview locale.
+// HÔTE T1 (#56) : le pur (types, slugs, normalisation) vit dans
+// tools-core/preview.ts et est réexporté ici ; ce module garde l'I/O disque.
 // La WebView dépose les PNG via Tauri `save_screenshot` dans le même dossier
 // (cache `niatscircuit/previews/`, override `PCB_MCP_PREVIEW_DIR` en tests) ;
 // l'outil MCP `preview_screenshot` ne fait que lire — jamais d'image inventée.
@@ -6,44 +8,28 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  NO_GPU_FALLBACK,
+  normalizePreviewSource,
+  OFFLINE_BANNER,
+  PREVIEW_MAX_BYTES,
+  PREVIEW_MAX_FILES,
+  sanitizePreviewName,
+  type PreviewSource,
+  type ReadPreviewResult,
+} from "./tools-core/preview.js";
 
-export type PreviewSource = "schematic_2d" | "pcb_2d" | "pcb_3d";
-
-export const PREVIEW_SOURCES: readonly PreviewSource[] = [
-  "schematic_2d",
-  "pcb_2d",
-  "pcb_3d",
-] as const;
-
-const ALIASES: Record<string, PreviewSource> = {
-  schematique_2d: "schematic_2d",
-  schematic: "schematic_2d",
-  schema: "schematic_2d",
-  pcb: "pcb_2d",
-  "3d": "pcb_3d",
+export {
+  NO_GPU_FALLBACK,
+  normalizePreviewSource,
+  OFFLINE_BANNER,
+  PREVIEW_MAX_BYTES,
+  PREVIEW_MAX_FILES,
+  sanitizePreviewName,
+  type PreviewSource,
+  type ReadPreviewResult,
 };
-
-export const OFFLINE_BANNER =
-  "RÉSEAU REQUIS hors-ligne — CDN désactivé (disableCdnLoading) : preview figée sur la dernière compile locale, aucun circuit-json inventé.";
-
-export const NO_GPU_FALLBACK =
-  "Sans GPU (WebGPU rendering failed constaté au prototype) : screenshot pcb_2d/pcb_3d bascule sur fallback SVG/canvas 2D documenté, jamais d'image inventée.";
-
-export function normalizePreviewSource(
-  input: unknown,
-): { ok: true; source: PreviewSource } | { ok: false; message: string } {
-  const raw = typeof input === "string" ? input.trim() : "";
-  if ((PREVIEW_SOURCES as readonly string[]).includes(raw)) {
-    return { ok: true, source: raw as PreviewSource };
-  }
-  const alias = ALIASES[raw];
-  if (alias) return { ok: true, source: alias };
-  return {
-    ok: false,
-    message:
-      `source screenshot inconnue "${raw}" (attendues : ${PREVIEW_SOURCES.join(", ")}, alias prototype "schematique_2d" accepté)`,
-  };
-}
+export { PREVIEW_SOURCES } from "./tools-core/preview.js";
 
 /** Dossier partagé WebView ↔ sidecar. Override tests via `PCB_MCP_PREVIEW_DIR`.
  *  Hook de TEST (revue #37 item 4) : jamais posé par le backend prod, non
@@ -65,20 +51,6 @@ export function previewMetaPath(source: PreviewSource, dir?: string, name?: stri
   const slug = sanitizePreviewName(name);
   const file = slug ? `${source}__${slug}.json` : `${source}.json`;
   return path.join(dir ?? previewDir(), file);
-}
-
-/** Nom de capture agent (Q10) : slug `a-z0-9-_`, max 32, vide → null. */
-export function sanitizePreviewName(name?: unknown): string | null {
-  if (name === undefined || name === null) return null;
-  const raw = String(name).trim();
-  if (!raw) return null;
-  let slug = raw
-    .replace(/[^A-Za-z0-9_-]+/g, "-")
-    .replace(/^[-_]+|[-_]+$/g, "")
-    .slice(0, 32)
-    .replace(/^[-_]+|[-_]+$/g, "");
-  while (slug.includes("--")) slug = slug.replace(/--/g, "-");
-  return slug || null;
 }
 
 function ensureDir(dir: string): void {
@@ -127,12 +99,6 @@ export interface SavedPreview {
 }
 
 const PNG_PREFIX = "data:image/png;base64,";
-
-/** Plafond capture (ticket #42) : refus au-delà de 20 Mo. */
-export const PREVIEW_MAX_BYTES = 20 * 1024 * 1024;
-
-/** Plafond captures par dossier (ticket #42) : 50 fichiers, éviction LRU. */
-export const PREVIEW_MAX_FILES = 50;
 
 /** Compteur exposé pour la future GC : captures PNG + octets du dossier. */
 export function previewCount(dir: string): { files: number; bytes: number } {
@@ -238,22 +204,6 @@ export function savePreview(input: SavePreviewInput, dir?: string): SavedPreview
   return { source, name, bytes: buf.length, width, height, path: filePath, previewUrl, updatedAt, totalFiles, evicted };
 }
 
-export interface ReadPreviewResult {
-  found: boolean;
-  source: PreviewSource | string;
-  name: string | null;
-  dataUrl: string | null;
-  bytes: number;
-  width: number | null;
-  height: number | null;
-  previewUrl: string | null;
-  updatedAt: string | null;
-  banner: string | null;
-  message: string | null;
-  errors: number;
-  warnings: number;
-}
-
 function latestPreviewPath(source: PreviewSource, dir: string): { path: string; name: string | null } | null {
   let entries: string[];
   try {
@@ -283,7 +233,7 @@ function latestPreviewPath(source: PreviewSource, dir: string): { path: string; 
 
 export function readPreview(
   sourceInput: unknown,
-  opts?: { dir?: string; disableCdnLoading?: boolean; name?: string },
+  opts?: { dir?: string; disableCdnLoading?: boolean; name?: string | null },
 ): ReadPreviewResult {
   const banner = opts?.disableCdnLoading ? OFFLINE_BANNER : null;
   const norm = normalizePreviewSource(sourceInput);
