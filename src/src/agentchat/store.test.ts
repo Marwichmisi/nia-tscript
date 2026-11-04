@@ -42,6 +42,7 @@ describe("store conversations", () => {
     const s = memStorage();
     const pleine: Conversation = {
       version: 1,
+      id: "conv-test",
       projectPath: PROJET,
       model: "muse-spark-1.3",
       mode: "manuel",
@@ -66,6 +67,7 @@ describe("store conversations", () => {
   test("compaction < 80 % : historique inchangé", () => {
     const conv: Conversation = {
       version: 1,
+      id: "conv-test",
       projectPath: PROJET,
       model: "muse-spark-1.3",
       mode: "manuel",
@@ -82,6 +84,7 @@ describe("store conversations", () => {
     const big = "déplace R1 de 2mm vers le haut. ".repeat(400); // ~13 600 car.
     const conv: Conversation = {
       version: 1,
+      id: "conv-test",
       projectPath: PROJET,
       model: "muse-spark-1.3",
       mode: "manuel",

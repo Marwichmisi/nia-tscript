@@ -2,7 +2,7 @@
 //
 // La boucle multi-tours + outils + arrêt est DÉLÉGUÉE au SDK via la
 // fabrique partagée (`agentFactory.ts` : UN `ToolLoopAgent`,
-// `stopWhen: stepCountIs(5)`, UN tool, `AbortSignal`) ; la session pilote
+// `stopWhen: stepCountIs(5)`, UN tool, `AbortSignal`) ; la Conversation pilote
 // via `agent.generate(...)`, le hook UI pilote le MÊME agent via
 // `DirectChatTransport` + `useChat` — mêmes pièces, mêmes règles.
 // Zéro réseau ici (modèle et routeur injectés) ; garde G3 (aucun appel
@@ -11,9 +11,10 @@
 import type { LanguageModel } from "ai";
 import { createLoopAgent } from "./agentFactory";
 import { AGENT_CHAT_SCHEMA_VERSION } from "./schemas";
-import { DEFAULT_MODEL_ID } from "./models";
+import { DEFAULT_MODEL_ID, supportsToolCalling } from "./models";
 import {
   compactConversation,
+  conversationSessionId,
   conversationTokens,
   estimateTokens,
   loadConversation,
@@ -26,8 +27,8 @@ import {
 } from "./store";
 import {
   type ApprovalGate,
-  type BatchExecutionOutcome,
-  type BatchExecutor,
+  type LotOutcome,
+  type LotExecutor,
 } from "./tools";
 
 export const NO_PROJECT_OPEN_MSG =
@@ -36,7 +37,7 @@ export const NO_PROJECT_OPEN_MSG =
 /** Budget contexte par défaut (≈ 24 000 caractères / 4, comme le backend). */
 export const DEFAULT_BUDGET_TOKENS = 6000;
 
-export type SessionStatus = "idle" | "working" | "awaiting-approval" | "error";
+export type ConversationStatus = "idle" | "working" | "awaiting-approval" | "error";
 
 export interface BoardSnapshot {
   summary: string;
@@ -44,22 +45,28 @@ export interface BoardSnapshot {
   elements: number;
 }
 
-export interface SessionDeps {
+export interface ConversationDeps {
   projectPath: string | null;
   modelId: string;
   storage: StorageLike;
   gate: ApprovalGate;
   /** Lecture libre (état carte) — jamais de throw contractuel ? si, catch ici. */
   readBoard: () => Promise<BoardSnapshot>;
-  executeLot: BatchExecutor;
+  executeLot: LotExecutor;
   modelFor: (modelId: string) => LanguageModel;
   budgetTokens?: number;
+  /** Hydratation asynchrone (coffre chiffré) : prioritaire sur `storage`. */
+  initialConversation?: Conversation;
+  /** Persistance asynchrone (coffre chiffré) : remplace `storage` si fournie. */
+  persistSink?: (projectPath: string, conv: Conversation) => void | Promise<void>;
 }
 
 export interface AgentChat {
   messages: ChatMessage[];
   pending: { toolCallId: string; operations: unknown[] }[];
-  status: SessionStatus;
+  status: ConversationStatus;
+  /** Identifiant stable de la Conversation (sessionId généralisé). */
+  conversationId: string;
   /** Texte partiel en cours de streaming (`null` hors streaming). */
   partial: string | null;
   needsConsent: boolean;
@@ -79,33 +86,50 @@ export interface AgentChat {
   subscribe(fn: () => void): () => void;
 }
 
-export function createAgentSession(deps: SessionDeps): AgentChat {
+export function createAgentConversation(deps: ConversationDeps): AgentChat {
   const budget = deps.budgetTokens ?? DEFAULT_BUDGET_TOKENS;
   let projectPath = deps.projectPath;
   let conv: Conversation = projectPath
     ? (() => {
+        if (deps.initialConversation && deps.initialConversation.projectPath === projectPath) {
+          const init = deps.initialConversation;
+          if (!init.model) init.model = deps.modelId || DEFAULT_MODEL_ID;
+          return init;
+        }
         const loaded = loadConversation(deps.storage, projectPath as string);
         if (!loaded.model) loaded.model = deps.modelId || DEFAULT_MODEL_ID;
         return loaded;
       })()
     : newConversation("", deps.modelId || DEFAULT_MODEL_ID);
-  let status: SessionStatus = "idle";
+  let status: ConversationStatus = "idle";
   let degraded: string | null = null;
   let needsConsent = false;
   let consentSummary = "";
   let abortedTurn: string | null = null;
   let ctrl: AbortController | null = null;
-  let turnOutcomes: BatchExecutionOutcome[] = [];
+  let turnOutcomes: LotOutcome[] = [];
   let partial: string | null = null;
   const listeners = new Set<() => void>();
   const notify = () => listeners.forEach((fn) => fn());
 
   function persist() {
-    if (projectPath) saveConversation(deps.storage, projectPath, conv);
+    if (!projectPath) return;
+    if (deps.persistSink) {
+      try {
+        const out = deps.persistSink(projectPath, conv);
+        if (out && typeof (out as Promise<void>).catch === "function") {
+          (out as Promise<void>).catch(() => undefined);
+        }
+      } catch {
+        // Persistance best-effort : la Conversation vit en mémoire.
+      }
+    } else {
+      saveConversation(deps.storage, projectPath, conv);
+    }
     notify();
   }
 
-  function setStatus(s: SessionStatus) {
+  function setStatus(s: ConversationStatus) {
     status = s;
     notify();
   }
@@ -156,15 +180,17 @@ export function createAgentSession(deps: SessionDeps): AgentChat {
       content: m.text,
     }));
 
-    const wrappedExecute: BatchExecutor = async (input) => {
+    const wrappedExecute: LotExecutor = async (input) => {
       try {
-        const outcome = await deps.executeLot(input);
+        // sessionId généralisé : l'id de Conversation, sauf session explicite
+        // du modèle (schéma inchangé, repli `default` côté routeur).
+        const outcome = await deps.executeLot({ operations: input.operations, sessionId: input.sessionId ?? conversationSessionId(conv) });
         turnOutcomes.push(outcome);
         setStatus("working");
         return outcome;
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
-        const outcome: BatchExecutionOutcome = {
+        const outcome: LotOutcome = {
           applied: false,
           rolledBack: false,
           errors: 1,
@@ -178,6 +204,7 @@ export function createAgentSession(deps: SessionDeps): AgentChat {
     };
 
     try {
+      const toolsSupported = supportsToolCalling(conv.model || DEFAULT_MODEL_ID);
       const agent = createLoopAgent({
         model: deps.modelFor(conv.model || DEFAULT_MODEL_ID),
         gate: deps.gate,
@@ -185,6 +212,7 @@ export function createAgentSession(deps: SessionDeps): AgentChat {
         getMode: () => conv.mode,
         boardSummary: snap.summary,
         compactionNotes: systems,
+        toolsSupported,
       });
       // La porte expose l'attente à l'UI : dès qu'un lot est proposé, le
       // statut passe en `awaiting-approval` (sondage léger ci-dessous).
@@ -226,7 +254,13 @@ export function createAgentSession(deps: SessionDeps): AgentChat {
             ? { applied: last.applied, rolledBack: last.rolledBack, errors: last.errors, message: last.message }
             : null,
         });
-        degraded = turnOutcomes.length === 0 ? "réponse texte seule (aucun outil appelé) — reformule ou change de modèle si tu attendais une modification." : null;
+        // US10 : modèle sans tool-calling → réponse texte seule + bandeau
+        // explicite (l'outil ne lui est jamais offert, aucun appel fantôme).
+        degraded = !toolsSupported
+          ? `« ${conv.model} » ne supporte pas les Lots — réponse en texte seul, sans modification de la carte. Choisis un modèle Meta (ex. ${DEFAULT_MODEL_ID}) pour proposer des lots.`
+          : turnOutcomes.length === 0
+            ? "réponse texte seule (aucun outil appelé) — reformule ou change de modèle si tu attendais une modification."
+            : null;
       } finally {
         clearInterval(watch);
       }
@@ -265,6 +299,7 @@ export function createAgentSession(deps: SessionDeps): AgentChat {
     get messages() { return conv.messages; },
     get pending() { return deps.gate.list(); },
     get status() { return status; },
+    get conversationId() { return conversationSessionId(conv); },
     get partial() { return partial; },
     get needsConsent() { return needsConsent; },
     get consentSummary() { return consentSummary; },

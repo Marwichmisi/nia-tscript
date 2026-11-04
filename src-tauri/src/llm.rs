@@ -101,8 +101,13 @@ pub fn is_url_allowed(url: &str) -> bool {
     if let Some(rest) = url.strip_prefix("https://api.meta.ai/v1/") {
         return !rest.is_empty();
     }
-    // Mode local (§7) : http loopback uniquement, port numérique exigé
+    // Mode local (§7, matrice V1) : http loopback uniquement, port numérique exigé
     // (refuse `localhost.evil.com` et tout `https` local).
+    // Justification : le loopback n'est pas routable hors machine (127.0.0.1/::1 =
+    // l'hôte lui-même) — l'allowlist l'autorise pour le mode local Ollama
+    // (serveur de modèles sur la machine, ex `http://localhost:11434`), sans
+    // ouvrir aucun accès réseau externe. Le port numérique exigé bloque les
+    // sosies (`localhost.evil.com`) et tout le reste reste refusé (deny prioritaire).
     for prefix in ["http://localhost:", "http://127.0.0.1:", "http://[::1]:"] {
         if let Some(rest) = url.strip_prefix(prefix) {
             match rest.find('/') {
@@ -512,6 +517,25 @@ pub fn verify_and_save_core(
     save_vault(cache_dir, clean, now_rfc3339, DEFAULT_MODEL)
 }
 
+/// Composition testable de la liste live (US7/US9) : `GET /v1/models`
+/// (coût nul) via allowlist, avec la clé du vault. Échec rapide sans retry :
+/// le frontend conserve son repli codé (liste vide ou erreur → repli).
+/// Exige un Projet ouvert (G3, comme tout appel fournisseur).
+pub fn list_models_core(
+    cache_dir: &Path,
+    project: Option<&str>,
+    transport: &dyn LlmTransport,
+) -> Result<Vec<String>, String> {
+    let _project = require_project_open(project)?;
+    let key = load_vault_key(cache_dir)?;
+    let url = models_url(META_API_BASE)?;
+    // `transport` ne voit que des URLs allowlistées (construites ci-dessus).
+    debug_assert!(is_url_allowed(&url));
+    let (status, retry_after_raw, body) = transport.get_models(&url, &key)?;
+    let retry = parse_retry_after(retry_after_raw.as_deref());
+    interpret_models_response(status, retry, &body)
+}
+
 /// Composition testable : re-vérifie la clé stockée sans l'écraser.
 /// 401 → `Err("…rouvre les Paramètres…")` pour le bandeau chat.
 pub fn test_stored_core(
@@ -885,6 +909,21 @@ pub fn llm_test(
         return Err("cache_dir indisponible".into());
     };
     test_stored_core(&cache, project.as_deref(), &ReqwestTransport::new())
+}
+
+/// Liste live des modèles (US7/US9) : `GET /v1/models` (coût nul) via
+/// allowlist, avec la clé du vault. Le frontend conserve son repli codé
+/// en cas d'erreur ou de liste vide — cette commande n'émet jamais de
+/// secret, seulement des identifiants de modèles.
+#[tauri::command]
+pub fn llm_models(
+    state: tauri::State<'_, std::sync::Arc<std::sync::Mutex<crate::BootState>>>,
+) -> Result<Vec<String>, String> {
+    let project = state.lock().expect("boot state").project_path.clone();
+    let Some(cache) = crate::boot::base_cache_dir() else {
+        return Err("cache_dir indisponible".into());
+    };
+    list_models_core(&cache, project.as_deref(), &ReqwestTransport::new())
 }
 
 #[tauri::command]
@@ -1452,6 +1491,62 @@ mod tests {
         assert!(st.telemetry_opt_in);
         assert_eq!(load_vault_key(&dir).unwrap(), "CLE-TEST-12345678", "clé intacte");
         assert_eq!(st.mask, "••••5678");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- liste live `llm_models` (US7/US9) : GET /v1/models via allowlist ---
+
+    #[test]
+    fn modeles_liste_200_ids() {
+        let dir = tmpdir("modelsok");
+        save_vault(&dir, "CLE-TEST-12345678", "2026-11-04T10:00:00Z", "default").unwrap();
+        let url = models_url(META_API_BASE).unwrap();
+        let t = FakeTransport::replying(&url, Ok((200, None, r#"{"data":[{"id":"muse-spark-1.3"},{"id":"autre"}]}"#.into())));
+        let ids = list_models_core(&dir, Some("/p"), &t).unwrap();
+        assert_eq!(ids, vec!["muse-spark-1.3".to_string(), "autre".to_string()]);
+        assert_eq!(t.calls.lock().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn modeles_liste_200_enveloppe_inattendue_repli_vide() {
+        let dir = tmpdir("modelsempty");
+        save_vault(&dir, "CLE-TEST-12345678", "2026-11-04T10:00:00Z", "default").unwrap();
+        let url = models_url(META_API_BASE).unwrap();
+        let t = FakeTransport::replying(&url, Ok((200, None, "{}".into())));
+        assert_eq!(list_models_core(&dir, Some("/p"), &t).unwrap(), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn modeles_liste_401_cle_invalide() {
+        let dir = tmpdir("models401");
+        save_vault(&dir, "CLE-TEST-12345678", "2026-11-04T10:00:00Z", "default").unwrap();
+        let url = models_url(META_API_BASE).unwrap();
+        let t = FakeTransport::replying(&url, Ok((401, None, "bad".into())));
+        let err = list_models_core(&dir, Some("/p"), &t).expect_err("401");
+        assert!(err.contains("invalide") || err.contains("révoquée"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn modeles_liste_sans_cle_refuse_avant_reseau() {
+        let dir = tmpdir("modelsnocle");
+        let t = ScriptTransport::scripted(vec![Ok((200, None, "{}".into()))]);
+        let err = list_models_core(&dir, Some("/p"), &t).expect_err("sans clé");
+        assert!(err.contains("aucune clé"), "{err}");
+        assert_eq!(t.ncalls(), 0, "aucun appel réseau");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn modeles_liste_sans_projet_refuse_avant_reseau() {
+        let dir = tmpdir("modelsnoproject");
+        save_vault(&dir, "CLE-TEST-12345678", "2026-11-04T10:00:00Z", "default").unwrap();
+        let t = ScriptTransport::scripted(vec![Ok((200, None, "{}".into()))]);
+        let err = list_models_core(&dir, None, &t).expect_err("NO_PROJECT_OPEN");
+        assert!(err.contains("NO_PROJECT_OPEN"), "{err}");
+        assert_eq!(t.ncalls(), 0, "aucun appel réseau");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

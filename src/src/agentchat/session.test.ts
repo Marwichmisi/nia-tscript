@@ -9,7 +9,7 @@ import type {
   LanguageModelV4StreamResult,
 } from "@ai-sdk/provider";
 import { createApprovalGate } from "./tools";
-import { createAgentSession, type SessionDeps } from "./session";
+import { createAgentConversation, type ConversationDeps } from "./session";
 
 function usageOf() {
   return {
@@ -65,7 +65,7 @@ function memStore() {
   };
 }
 
-function deps(over: Partial<SessionDeps> = {}): SessionDeps {
+function deps(over: Partial<ConversationDeps> = {}): ConversationDeps {
   return {
     projectPath: "/projets/demo",
     modelId: "muse-spark-1.3",
@@ -83,14 +83,14 @@ function deps(over: Partial<SessionDeps> = {}): SessionDeps {
 describe("session AgentChat", () => {
   test("aucun appel sans Projet ouvert (garde G3 avant tout réseau)", async () => {
     const complete = vi.fn();
-    const neverModel = (() => { throw new Error("ne doit pas construire"); }) as unknown as SessionDeps["modelFor"];
-    const s = createAgentSession(deps({ projectPath: null, modelFor: neverModel }));
+    const neverModel = (() => { throw new Error("ne doit pas construire"); }) as unknown as ConversationDeps["modelFor"];
+    const s = createAgentConversation(deps({ projectPath: null, modelFor: neverModel }));
     await expect(s.send("bonjour")).rejects.toThrow("NO_PROJECT_OPEN");
     expect(complete).not.toHaveBeenCalled();
   });
 
   test("consentement requis avant le premier envoi (opt-in pré-envoi)", async () => {
-    const s = createAgentSession(deps());
+    const s = createAgentConversation(deps());
     await s.send("bonjour");
     expect(s.needsConsent).toBe(true);
     expect(s.messages).toHaveLength(0);
@@ -101,7 +101,7 @@ describe("session AgentChat", () => {
 
   test("approval unique par lot : 1 lot proposé → 1 approval → 1 exécution", async () => {
     const executeLot = vi.fn(async () => ({ applied: true, rolledBack: false, errors: 0, message: "lot appliqué", code: null }));
-    const s = createAgentSession(
+    const s = createAgentConversation(
       deps({
         executeLot,
         modelFor: () =>
@@ -122,7 +122,7 @@ describe("session AgentChat", () => {
   });
 
   test("switch mid-conversation : historique partagé, étiquette par message", async () => {
-    const s = createAgentSession(deps());
+    const s = createAgentConversation(deps());
     s.giveConsent();
     await s.send("question 1");
     s.setModel("muse-spark-1.2");
@@ -133,7 +133,7 @@ describe("session AgentChat", () => {
   });
 
   test("compaction à 80 % : résumé + derniers tours, conversation continue", async () => {
-    const s = createAgentSession(deps({ budgetTokens: 40 }));
+    const s = createAgentConversation(deps({ budgetTokens: 40 }));
     s.giveConsent();
     await s.send("un premier message assez long pour remplir le budget");
     await s.send("un deuxième message qui force la compaction du contexte");
@@ -145,7 +145,7 @@ describe("session AgentChat", () => {
 
   test("dégradation sans tool-calling : texte seul, routeur jamais appelé", async () => {
     const executeLot = vi.fn();
-    const s = createAgentSession(
+    const s = createAgentConversation(
       deps({
         executeLot,
         modelFor: () => new MockLanguageModelV4({ doStream: [textStream("voici la doc, sans toucher la carte.")] }) as never,
@@ -158,12 +158,51 @@ describe("session AgentChat", () => {
     expect(s.messages.filter((m) => m.role === "assistant")).toHaveLength(1);
   });
 
+  test("modèle sans tool-calling (US10) : texte seul + bandeau explicite, outil jamais offert", async () => {
+    const executeLot = vi.fn(async () => ({ applied: true, rolledBack: false, errors: 0, message: "ok", code: null }));
+    const s = createAgentConversation(
+      deps({
+        modelId: "llama3-local",
+        executeLot,
+        modelFor: () => new MockLanguageModelV4({ doStream: [textStream("voici la doc.")] }) as never,
+      }),
+    );
+    s.giveConsent();
+    await s.send("déplace R1");
+    expect(executeLot).not.toHaveBeenCalled();
+    expect(s.pending).toHaveLength(0);
+    expect(s.degraded).toMatch(/ne supporte pas les Lots/);
+    expect(s.messages.filter((m) => m.role === "assistant")).toHaveLength(1);
+  });
+
+  test("sessionId généralisé : l'id de Conversation isole les lots, stable entre tours", async () => {
+    const seen: (string | undefined)[] = [];
+    const executeLot = vi.fn(async (input: { sessionId?: string }) => {
+      seen.push(input.sessionId);
+      return { applied: true, rolledBack: false, errors: 0, message: "lot appliqué", code: null };
+    });
+    const s = createAgentConversation(
+      deps({
+        executeLot: executeLot as never,
+        modelFor: () =>
+          new MockLanguageModelV4({ doStream: lotStream(LOT_INPUT, "lot appliqué.") }) as never,
+      }),
+    );
+    expect(s.conversationId).toBeTruthy();
+    s.setMode("auto");
+    s.giveConsent();
+    await s.send("déplace R1");
+    await s.send("puis tourne");
+    expect(seen.length).toBeGreaterThan(0);
+    for (const id of seen) expect(id).toBe(s.conversationId);
+  });
+
   test("sidecar éteint : échec lot visible (rollback), chat réutilisable", async () => {
     const executeLot = vi
       .fn()
       .mockRejectedValueOnce(new Error("connexion sidecar refusée"))
       .mockResolvedValue({ applied: true, rolledBack: false, errors: 0, message: "ok", code: null });
-    const s = createAgentSession(
+    const s = createAgentConversation(
       deps({
         executeLot,
         modelFor: () => new MockLanguageModelV4({ doStream: lotStream(LOT_INPUT, "second essai.") }) as never,
@@ -181,7 +220,7 @@ describe("session AgentChat", () => {
 
   test("Stop pendant l'approbation puis reprise : aucun doublon, lot appliqué", async () => {
     const executeLot = vi.fn(async () => ({ applied: true, rolledBack: false, errors: 0, message: "ok", code: null }));
-    const s = createAgentSession(
+    const s = createAgentConversation(
       deps({
         executeLot,
         modelFor: () => new MockLanguageModelV4({ doStream: lotStream(LOT_INPUT, "lot appliqué.") }) as never,

@@ -3,7 +3,7 @@
 // import node: — la résolution du Projet ouvert (`currentProjectPath` /
 // lockfile) est EXCLUE du cœur : l'hôte (`src/state.ts`) injecte le nom de
 // board résolu (`projectBoardName`) à `getBoardState`. Le TSX reste la seule
-// source de vérité ; le store en mémoire est initialisé avec la fixture
+// source de vérité ; le store en mémoire est initialisé avec le gabarit démo
 // R1/R2+U1 du prototype et muté uniquement via `code_patch`.
 import { BOARD_CODE } from "./board.js";
 
@@ -45,7 +45,7 @@ export function getHierarchy(boardName = "board", sessionId = "default", code = 
   };
 }
 
-/** Composants du TSX courant (T2 I10, #59) : plus de fixture — la
+/** Composants du TSX courant (T2 I10, #59) : plus de gabarit figé — la
  *  hiérarchie reflète le code en mémoire (miroir du disque). Balises
  *  feuille portant un name="..." + nets/pins issus des <trace>. */
 function parseHierarchyComponents(code: string): HierarchyComponent[] {
@@ -131,7 +131,7 @@ const SEED_LOGS: LogEntry[] = [
   { seq: 2, ts: "2026-11-01T00:00:02Z", level: "info", source: "compile", message: "compile ok : 0 erreur, 0 warning" },
   { seq: 3, ts: "2026-11-01T00:00:03Z", level: "warn", source: "drc", message: "drc : 0 violation" },
   { seq: 4, ts: "2026-11-01T00:00:04Z", level: "info", source: "erc", message: "erc : 0 erreur" },
-  { seq: 5, ts: "2026-11-01T00:00:05Z", level: "error", source: "compile", message: "exemple : net flottant NC-1 (fixture)" },
+  { seq: 5, ts: "2026-11-01T00:00:05Z", level: "error", source: "compile", message: "exemple : net flottant NC-1 (gabarit démo)" },
 ];
 
 export interface StoreSnapshot {
@@ -160,7 +160,7 @@ export interface MemoryStore {
     hasMore: boolean;
     newErrors: number;
   };
-  /** Remet le store à la fixture (isolation des tests). */
+  /** Remet le store au gabarit démo (isolation des tests). */
   reset(): void;
 }
 

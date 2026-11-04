@@ -37,6 +37,8 @@ export interface CompleteRequest {
   model: string;
   input: string;
   maxTokens: number;
+  /** Décision spec : échanges simples en Chat Completions, boucle en Responses. */
+  mode: "chat" | "responses";
 }
 
 /** Seam injecté (prod : `llm_complete` via invoke ; tests : double). */
@@ -121,6 +123,24 @@ export function serializePrompt(
   return parts.filter(Boolean).join("\n\n");
 }
 
+/**
+ * Décision spec (US7) : un tour SANS historique d'outils (question simple,
+ * premier appel) part en Chat Completions ; dès que le prompt porte des
+ * appels ou résultats d'outils (la boucle lot tourne), on bascule en
+ * Responses — seul ce mode porte la boucle multi-tours côté fournisseur.
+ */
+export function selectChatMode(prompt: LanguageModelV4Prompt): "chat" | "responses" {
+  for (const m of prompt) {
+    if (m.role === "tool") return "responses";
+    if (m.role === "assistant") {
+      for (const p of m.content) {
+        if ((p as { type: string }).type === "tool-call") return "responses";
+      }
+    }
+  }
+  return "chat";
+}
+
 let callSeq = 0;
 
 /** Modèle Meta via la clé du porteur (commande T4, jamais de clé ici). */
@@ -173,7 +193,7 @@ export class TauriMetaModel implements LanguageModelV4 {
       "Réponds en français. Pour modifier la carte : UN bloc ```batch_execute {json} ; sinon texte seul.",
     );
     const reply = await this.complete(
-      { model: this.modelId, input, maxTokens: this.maxTokens },
+      { model: this.modelId, input, maxTokens: this.maxTokens, mode: selectChatMode(options.prompt) },
       options.abortSignal,
     );
     if (options.abortSignal?.aborted) throw abortError();
@@ -193,7 +213,7 @@ export class TauriMetaModel implements LanguageModelV4 {
       "Réponds en français. Pour modifier la carte : UN bloc ```batch_execute {json} ; sinon texte seul.",
     );
     const reply = await this.complete(
-      { model: this.modelId, input, maxTokens: this.maxTokens },
+      { model: this.modelId, input, maxTokens: this.maxTokens, mode: selectChatMode(options.prompt) },
       options.abortSignal,
     );
     if (options.abortSignal?.aborted) throw abortError();

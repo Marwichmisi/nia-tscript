@@ -100,4 +100,31 @@ describe("TauriMetaModel", () => {
     expect(input.indexOf("SYS")).toBeLessThan(input.indexOf("bonjour"));
     expect(input).not.toMatch(/FAUSSE-CLE/i);
   });
+
+  test("échange simple → Chat Completions, boucle (résultat outil) → Responses", async () => {
+    const seen: string[] = [];
+    const complete = vi.fn(async (req: { model: string; input: string; maxTokens: number; mode: string }) => {
+      seen.push(req.mode);
+      return { text: "ok", tokensUsed: 1 };
+    });
+    const model = new TauriMetaModel({ modelId: "muse-spark-1.3", complete: complete as never });
+    await model.doGenerate({
+      prompt: [{ role: "user", content: [{ type: "text", text: "salut" }] }],
+    });
+    expect(seen).toEqual(["chat"]);
+    await model.doGenerate({
+      prompt: [
+        { role: "user", content: [{ type: "text", text: "déplace R1" }] },
+        {
+          role: "assistant",
+          content: [{ type: "tool-call", toolCallId: "c1", toolName: "batch_execute", input: "{}" }],
+        },
+        {
+          role: "tool",
+          content: [{ type: "tool-result", toolCallId: "c1", toolName: "batch_execute", output: { type: "text", value: "lot appliqué" } }],
+        },
+      ],
+    });
+    expect(seen).toEqual(["chat", "responses"]);
+  });
 });

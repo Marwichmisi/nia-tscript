@@ -1,4 +1,4 @@
-// Fixture board R1/R2+U1 (réutilisée du prototype preview-web, commit 83ab848).
+// Gabarit démo board R1/R2+U1 (réutilisée du prototype preview-web, commit 83ab848).
 // Le TSX reste la seule source de vérité (write-through) ; ce module ne fait
 // que fournir le contenu initial + les stats circuit-json.
 
@@ -112,7 +112,7 @@ export function isBoardRouted(circuitJson: unknown[]): boolean {
   return false;
 }
 
-/** Fixture preuve #13 : placement invalide (R1/R2 superposés en 0,0). */
+/** Gabarit démo preuve #13 : placement invalide (R1/R2 superposés en 0,0). */
 export const BOARD_INVALID_PLACEMENT = `export default () => (
   <board width="20mm" height="20mm">
     <resistor name="R1" resistance="10k" footprint="0402" pcbX={0} pcbY={0} />
