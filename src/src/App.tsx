@@ -18,6 +18,8 @@ import { compileBoard, type CompileMode } from "./lib/compile";
 import { captureScreenshot, type PreviewSource } from "./lib/screenshot";
 import { preloadManifold } from "./lib/manifold";
 import { Home } from "./components/Home";
+// T6-agent (ticket #61) : tiroir Agent intégré (variante B validée).
+import { AgentDrawer } from "./agentchat/AgentDrawer";
 import {
   closeProject as closeProj,
   createProject as createProj,
@@ -101,6 +103,11 @@ function initialHeight(): number {
 
 function initialCollapsed(): boolean {
   return window.localStorage.getItem("nia.term.collapsed") === "1";
+}
+
+/** Tiroir agent ouvert par défaut (variante B), préférence persistée. */
+function initialAgentOpen(): boolean {
+  return window.localStorage.getItem("nia.agent.open") !== "0";
 }
 
 /** Hauteur du conteneur viewer (ResizeObserver) pour le PCBViewer,
@@ -187,6 +194,8 @@ export default function App() {
   const [tab, setTab] = useState<Tab>(() => initialTab());
   const [termTab, setTermTab] = useState<TermTab>(() => initialTermTab());
   const [termCollapsed, setTermCollapsed] = useState<boolean>(() => initialCollapsed());
+  // T6-agent : tiroir droit (variante B), Terminal bas inchangé.
+  const [agentOpen, setAgentOpen] = useState<boolean>(() => initialAgentOpen());
   const [termHeight, setTermHeight] = useState<number>(() => initialHeight());
   const [circuitJson, setCircuitJson] = useState<unknown[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
@@ -743,6 +752,10 @@ export default function App() {
     window.localStorage.setItem("nia.term.collapsed", termCollapsed ? "1" : "0");
   }, [termCollapsed]);
 
+  useEffect(() => {
+    window.localStorage.setItem("nia.agent.open", agentOpen ? "1" : "0");
+  }, [agentOpen]);
+
   const stats = computeStats(circuitJson);
   const ready = mode === "worker-blob-local" || mode === "worker-blob-local-nocdn";
   const compiling = mode === "compilation…";
@@ -987,6 +1000,17 @@ export default function App() {
             <Button variant="outline" size="sm" onClick={handleClose} disabled={projBusy}>
               Fermer
             </Button>
+            {/* T6-agent : ouvrir/replier le tiroir (preview pleine largeur quand replié). */}
+            <Button
+              variant={agentOpen ? "default" : "outline"}
+              size="sm"
+              onClick={() => setAgentOpen((o) => !o)}
+              aria-label={agentOpen ? "Replier le tiroir agent" : "Ouvrir l'agent"}
+              aria-expanded={agentOpen}
+              title="Agent intégré (tiroir droit)"
+            >
+              Agent IA
+            </Button>
           </TooltipProvider>
         </div>
       </header>
@@ -1044,6 +1068,9 @@ export default function App() {
         onOpenSettings={() => setLlmOpen(true)}
       />
 
+      {/* T6-agent : tiroir droit sur preview pleine largeur (variante B) ;
+          le Terminal reste en bas, inchangé. */}
+      <div className="studio-body">
       <main id="viewer" className="viewer-main" aria-label={`Visualiseur ${TAB_LABEL[tab]}`} aria-busy={compiling}>
         {/* Pastilles décoratives masquées (l'onglet est déjà annoncé par
             aria-label) ; le bouton moteur reste exposé au clavier/lecteur
@@ -1142,6 +1169,15 @@ export default function App() {
           )}
         </div>
       </main>
+      {agentOpen && projectPath && (
+        <AgentDrawer
+          projectPath={projectPath}
+          keyConfigured={llmStatusState?.configured === true}
+          onOpenSettings={() => setLlmOpen(true)}
+          onClose={() => setAgentOpen(false)}
+        />
+      )}
+      </div>
 
       <Terminal
         tab={termTab}
