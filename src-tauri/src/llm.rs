@@ -488,15 +488,23 @@ pub fn clear_vault(cache_dir: &Path) -> Result<bool, String> {
 /// Réponse brute : (statut HTTP, `Retry-After` brut, corps).
 pub type RawResponse = (u16, Option<String>, String);
 
+/// Futur de transport boxé (object-safe) : le `Sleep`/`op` injectés en test
+/// restent synchrones, seul le transport réel est asynchrone.
+pub type TransportFut<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<RawResponse, String>> + Send + 'a>>;
+pub type SleepFut = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
 /// Bord système : le HTTP réel. Prod = `reqwest`, tests = `FakeTransport`.
-pub trait LlmTransport {
-    fn get_models(&self, url: &str, key: &str) -> Result<RawResponse, String>;
-    fn post_chat(&self, url: &str, key: &str, body: &str) -> Result<RawResponse, String>;
+/// Async de bout en bout : les commandes Tauri `async` tournent sur le pool
+/// du runtime — aucun `block_on` (qui paniquait sur le thread principal,
+/// sans runtime : crash à la validation de clé).
+pub trait LlmTransport: Send + Sync {
+    fn get_models<'a>(&'a self, url: &'a str, key: &'a str) -> TransportFut<'a>;
+    fn post_chat<'a>(&'a self, url: &'a str, key: &'a str, body: &'a str) -> TransportFut<'a>;
 }
 
 /// Composition testable (sans réseau) : vérifie via le transport puis
 /// persiste SSI la clé est acceptée. L'ancienne clé survit à un refus.
-pub fn verify_and_save_core(
+pub async fn verify_and_save_core(
     cache_dir: &Path,
     project: Option<&str>,
     key: &str,
@@ -511,7 +519,7 @@ pub fn verify_and_save_core(
     let url = models_url(META_API_BASE)?;
     // `transport` ne voit que des URLs allowlistées (construites ci-dessus).
     debug_assert!(is_url_allowed(&url));
-    let (status, retry_after_raw, body) = transport.get_models(&url, clean)?;
+    let (status, retry_after_raw, body) = transport.get_models(&url, clean).await?;
     let retry = parse_retry_after(retry_after_raw.as_deref());
     let _models = interpret_models_response(status, retry, &body)?;
     save_vault(cache_dir, clean, now_rfc3339, DEFAULT_MODEL)
@@ -521,7 +529,7 @@ pub fn verify_and_save_core(
 /// (coût nul) via allowlist, avec la clé du vault. Échec rapide sans retry :
 /// le frontend conserve son repli codé (liste vide ou erreur → repli).
 /// Exige un Projet ouvert (G3, comme tout appel fournisseur).
-pub fn list_models_core(
+pub async fn list_models_core(
     cache_dir: &Path,
     project: Option<&str>,
     transport: &dyn LlmTransport,
@@ -531,14 +539,14 @@ pub fn list_models_core(
     let url = models_url(META_API_BASE)?;
     // `transport` ne voit que des URLs allowlistées (construites ci-dessus).
     debug_assert!(is_url_allowed(&url));
-    let (status, retry_after_raw, body) = transport.get_models(&url, &key)?;
+    let (status, retry_after_raw, body) = transport.get_models(&url, &key).await?;
     let retry = parse_retry_after(retry_after_raw.as_deref());
     interpret_models_response(status, retry, &body)
 }
 
 /// Composition testable : re-vérifie la clé stockée sans l'écraser.
 /// 401 → `Err("…rouvre les Paramètres…")` pour le bandeau chat.
-pub fn test_stored_core(
+pub async fn test_stored_core(
     cache_dir: &Path,
     project: Option<&str>,
     transport: &dyn LlmTransport,
@@ -547,7 +555,7 @@ pub fn test_stored_core(
     let key = load_vault_key(cache_dir)?;
     let url = models_url(META_API_BASE)?;
     debug_assert!(is_url_allowed(&url));
-    let (status, retry_after_raw, body) = transport.get_models(&url, &key)?;
+    let (status, retry_after_raw, body) = transport.get_models(&url, &key).await?;
     let retry = parse_retry_after(retry_after_raw.as_deref());
     match interpret_models_response(status, retry, &body) {
         Ok(_) => load_vault_meta(cache_dir).ok_or_else(|| {
@@ -637,7 +645,7 @@ fn host_of(url: &str) -> &str {
     rest.split('/').next().unwrap_or(rest)
 }
 
-fn read_raw_response(
+async fn read_raw_response(
     resp: reqwest::Response,
 ) -> Result<RawResponse, String> {
     let status = resp.status().as_u16();
@@ -646,30 +654,34 @@ fn read_raw_response(
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let body = tauri::async_runtime::block_on(resp.text()).map_err(|_| transport_error_msg())?;
+    let body = resp.text().await.map_err(|_| transport_error_msg())?;
     Ok((status, retry, body))
 }
 
 impl LlmTransport for ReqwestTransport {
-    fn get_models(&self, url: &str, key: &str) -> Result<RawResponse, String> {
-        if !is_url_allowed(url) {
-            return Err(format!("hôte non autorisé (allowlist) : {}", host_of(url)));
-        }
-        let resp = tauri::async_runtime::block_on(
-            http_client().get(url).bearer_auth(key).send(),
-        )
-        .map_err(|_| transport_error_msg())?;
-        let status = resp.status().as_u16();
-        eprintln!("[llm] GET {} -> {status}", sanitize_for_log(url, &[]));
-        read_raw_response(resp)
+    fn get_models<'a>(&'a self, url: &'a str, key: &'a str) -> TransportFut<'a> {
+        Box::pin(async move {
+            if !is_url_allowed(url) {
+                return Err(format!("hôte non autorisé (allowlist) : {}", host_of(url)));
+            }
+            let resp = http_client()
+                .get(url)
+                .bearer_auth(key)
+                .send()
+                .await
+                .map_err(|_| transport_error_msg())?;
+            let status = resp.status().as_u16();
+            eprintln!("[llm] GET {} -> {status}", sanitize_for_log(url, &[]));
+            read_raw_response(resp).await
+        })
     }
 
-    fn post_chat(&self, url: &str, key: &str, body: &str) -> Result<RawResponse, String> {
-        if !is_url_allowed(url) {
-            return Err(format!("hôte non autorisé (allowlist) : {}", host_of(url)));
-        }
-        let resp = tauri::async_runtime::block_on(
-            http_client()
+    fn post_chat<'a>(&'a self, url: &'a str, key: &'a str, body: &'a str) -> TransportFut<'a> {
+        Box::pin(async move {
+            if !is_url_allowed(url) {
+                return Err(format!("hôte non autorisé (allowlist) : {}", host_of(url)));
+            }
+            let resp = http_client()
                 .post(url)
                 .bearer_auth(key)
                 .header(
@@ -677,13 +689,14 @@ impl LlmTransport for ReqwestTransport {
                     "application/json",
                 )
                 .body(body.to_string())
-                .send(),
-        )
-        .map_err(|_| transport_error_msg())?;
-        let status = resp.status().as_u16();
-        // G8 : statut + taille uniquement, jamais le prompt ni la clé.
-        eprintln!("[llm] POST {} -> {status}", sanitize_for_log(url, &[]));
-        read_raw_response(resp)
+                .send()
+                .await
+                .map_err(|_| transport_error_msg())?;
+            let status = resp.status().as_u16();
+            // G8 : statut + taille uniquement, jamais le prompt ni la clé.
+            eprintln!("[llm] POST {} -> {status}", sanitize_for_log(url, &[]));
+            read_raw_response(resp).await
+        })
     }
 }
 
@@ -691,11 +704,11 @@ impl LlmTransport for ReqwestTransport {
 /// l'appel) ; `sleep` injecté pour testabilité. Ni les erreurs transport
 /// (hors-ligne : échec rapide, cf. offline-first) ni les 401/402/403 ne se
 /// rejouent.
-pub fn call_with_retry(
-    op: &mut dyn FnMut() -> Result<RawResponse, String>,
-    sleep: &dyn Fn(u64),
+pub async fn call_with_retry<'a>(
+    op: &mut (dyn FnMut() -> TransportFut<'a> + Send + 'a),
+    sleep: &(dyn Fn(u64) -> SleepFut + Send + Sync),
 ) -> Result<RawResponse, String> {
-    let mut last = op()?;
+    let mut last = op().await?;
     for attempt in 0..MAX_ATTEMPTS {
         let status = last.0;
         if !should_retry(status) {
@@ -709,8 +722,9 @@ pub fn call_with_retry(
         sleep(backoff_delay_ms(
             attempt,
             parse_retry_after(last.1.as_deref()),
-        ));
-        last = op()?;
+        ))
+        .await;
+        last = op().await?;
     }
     Ok(last)
 }
@@ -791,14 +805,14 @@ pub fn interpret_chat_response(
 
 /// Composition testable de la commande dédiée unique : contrôles pré-envoi,
 /// clé du vault, URL allowlistée, retry, compteur session persisté.
-/// Le `sleep` réel dort sur le pool bloquant des commandes sync (pas
-/// d'executor stallé) ; les tests injectent un no-op enregistreur.
-pub fn complete_core(
+/// Le `sleep` réel est async (tokio) : les commandes sont `async`, aucun
+/// thread n'est bloqué ; les tests injectent un no-op enregistreur.
+pub async fn complete_core(
     cache_dir: &Path,
     project: Option<&str>,
     req: &ChatRequest,
     transport: &dyn LlmTransport,
-    sleep: &dyn Fn(u64),
+    sleep: &(dyn Fn(u64) -> SleepFut + Send + Sync),
 ) -> Result<ChatReply, String> {
     let project = require_project_open(project)?;
     // Budget lu du vault (0 si absent — `load_vault_key` refusera juste après).
@@ -816,7 +830,7 @@ pub fn complete_core(
     }
     .to_string();
     let mut op = || transport.post_chat(&url, &key, &body);
-    let (status, retry_raw, resp_body) = call_with_retry(&mut op, sleep)?;
+    let (status, retry_raw, resp_body) = call_with_retry(&mut op, sleep).await?;
     let retry = parse_retry_after(retry_raw.as_deref());
     let (text, used) = interpret_chat_response(status, retry, &resp_body, &req.mode, estimated)?;
     add_session_tokens(cache_dir, used)?;
@@ -888,7 +902,7 @@ pub fn llm_status() -> Result<LlmStatus, String> {
 }
 
 #[tauri::command]
-pub fn llm_verify_and_save(
+pub async fn llm_verify_and_save(
     state: tauri::State<'_, std::sync::Arc<std::sync::Mutex<crate::BootState>>>,
     key: String,
 ) -> Result<LlmStatus, String> {
@@ -897,18 +911,18 @@ pub fn llm_verify_and_save(
         return Err("cache_dir indisponible".into());
     };
     let now = chrono::Utc::now().to_rfc3339();
-    verify_and_save_core(&cache, project.as_deref(), &key, &now, &ReqwestTransport::new())
+    verify_and_save_core(&cache, project.as_deref(), &key, &now, &ReqwestTransport::new()).await
 }
 
 #[tauri::command]
-pub fn llm_test(
+pub async fn llm_test(
     state: tauri::State<'_, std::sync::Arc<std::sync::Mutex<crate::BootState>>>,
 ) -> Result<LlmStatus, String> {
     let project = state.lock().expect("boot state").project_path.clone();
     let Some(cache) = crate::boot::base_cache_dir() else {
         return Err("cache_dir indisponible".into());
     };
-    test_stored_core(&cache, project.as_deref(), &ReqwestTransport::new())
+    test_stored_core(&cache, project.as_deref(), &ReqwestTransport::new()).await
 }
 
 /// Liste live des modèles (US7/US9) : `GET /v1/models` (coût nul) via
@@ -916,14 +930,14 @@ pub fn llm_test(
 /// en cas d'erreur ou de liste vide — cette commande n'émet jamais de
 /// secret, seulement des identifiants de modèles.
 #[tauri::command]
-pub fn llm_models(
+pub async fn llm_models(
     state: tauri::State<'_, std::sync::Arc<std::sync::Mutex<crate::BootState>>>,
 ) -> Result<Vec<String>, String> {
     let project = state.lock().expect("boot state").project_path.clone();
     let Some(cache) = crate::boot::base_cache_dir() else {
         return Err("cache_dir indisponible".into());
     };
-    list_models_core(&cache, project.as_deref(), &ReqwestTransport::new())
+    list_models_core(&cache, project.as_deref(), &ReqwestTransport::new()).await
 }
 
 #[tauri::command]
@@ -943,7 +957,7 @@ pub fn llm_set_telemetry(optin: bool) -> Result<LlmStatus, String> {
 }
 
 #[tauri::command]
-pub fn llm_complete(
+pub async fn llm_complete(
     state: tauri::State<'_, std::sync::Arc<std::sync::Mutex<crate::BootState>>>,
     req: ChatRequest,
 ) -> Result<ChatReply, String> {
@@ -951,16 +965,17 @@ pub fn llm_complete(
     let Some(cache) = crate::boot::base_cache_dir() else {
         return Err("cache_dir indisponible".into());
     };
-    // Jitter borné 0–500 ms ajouté au backoff (hors tests : `complete_core`
-    // reçoit le `sleep` injecté).
+    // Jitter borné 0–500 ms ajouté au backoff, dormi en async (aucun thread
+    // bloqué — les commandes sont `async`) ; `complete_core` reçoit le
+    // `sleep` injecté en test.
     let sleep = |ms: u64| {
         let jitter: u64 = {
             let mut b = [0u8; 8];
             getrandom::fill(&mut b).map(|_| u64::from_ne_bytes(b) % 500).unwrap_or(0)
         };
-        std::thread::sleep(Duration::from_millis(ms.saturating_add(jitter)));
+        Box::pin(tokio::time::sleep(Duration::from_millis(ms.saturating_add(jitter)))) as SleepFut
     };
-    complete_core(&cache, project.as_deref(), &req, &ReqwestTransport::new(), &sleep)
+    complete_core(&cache, project.as_deref(), &req, &ReqwestTransport::new(), &sleep).await
 }
 
 // --- Tests (spec exécutable, cf. skill tdd : RED d'abord) -----------------------
@@ -987,18 +1002,22 @@ mod tests {
     }
 
     impl LlmTransport for FakeTransport {
-        fn get_models(&self, url: &str, _key: &str) -> Result<RawResponse, String> {
-            self.calls.lock().unwrap().push(url.to_string());
-            self.replies
-                .lock()
-                .unwrap()
-                .get(url)
-                .cloned()
-                .unwrap_or(Err(transport_error_msg()))
+        fn get_models<'a>(&'a self, url: &'a str, _key: &'a str) -> TransportFut<'a> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(url.to_string());
+                self.replies
+                    .lock()
+                    .unwrap()
+                    .get(url)
+                    .cloned()
+                    .unwrap_or(Err(transport_error_msg()))
+            })
         }
-        fn post_chat(&self, url: &str, _key: &str, _body: &str) -> Result<RawResponse, String> {
-            self.calls.lock().unwrap().push(url.to_string());
-            Err("non câblé".to_string())
+        fn post_chat<'a>(&'a self, url: &'a str, _key: &'a str, _body: &'a str) -> TransportFut<'a> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(url.to_string());
+                Err("non câblé".to_string())
+            })
         }
     }
 
@@ -1200,8 +1219,8 @@ mod tests {
 
     // --- cycle : enregistrer → refuser → remplacer → supprimer ------------------------------
 
-    #[test]
-    fn cycle_fausse_cle_refusee_ancienne_conservee() {
+    #[tokio::test]
+    async fn cycle_fausse_cle_refusee_ancienne_conservee() {
         let dir = tmpdir("cycle");
         let url = models_url(META_API_BASE).unwrap();
         // D'abord une clé valide enregistrée.
@@ -1212,7 +1231,7 @@ mod tests {
             "BONNE-CLE-TEST-AAAA-1111",
             "2026-11-04T10:00:00Z",
             &ok,
-        )
+        ).await
         .unwrap();
         assert_eq!(st.mask, "••••1111");
         // Puis une fausse clé refusée (401) : l'ancienne survit.
@@ -1223,18 +1242,18 @@ mod tests {
             "FAUSSE-CLE-XXXX-9999",
             "2026-11-04T10:01:00Z",
             &ko,
-        )
+        ).await
         .expect_err("401 = refus");
         assert!(err.contains("invalide") || err.contains("révoquée"), "{err}");
         assert_eq!(load_vault_key(&dir).unwrap(), "BONNE-CLE-TEST-AAAA-1111");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn verify_sans_projet_refuse_avant_reseau() {
+    #[tokio::test]
+    async fn verify_sans_projet_refuse_avant_reseau() {
         let dir = tmpdir("noproject");
         let t = FakeTransport::replying("jamais", Ok((200, None, "{}".into())));
-        let err = verify_and_save_core(&dir, None, "CLE-TEST-12345678", "2026-11-04T10:00:00Z", &t)
+        let err = verify_and_save_core(&dir, None, "CLE-TEST-12345678", "2026-11-04T10:00:00Z", &t).await
             .expect_err("NO_PROJECT_OPEN");
         assert!(err.contains("NO_PROJECT_OPEN"), "{err}");
         assert!(t.calls.lock().unwrap().is_empty(), "aucun appel réseau");
@@ -1242,16 +1261,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn tester_cle_refusee_bandeau_rouvre_parametres() {
+    #[tokio::test]
+    async fn tester_cle_refusee_bandeau_rouvre_parametres() {
         let dir = tmpdir("testrefuse");
         let url = models_url(META_API_BASE).unwrap();
         let ok = FakeTransport::replying(&url, Ok((200, None, r#"{"data":[]}"#.into())));
-        verify_and_save_core(&dir, Some("/p"), "CLE-TEST-12345678", "2026-11-04T10:00:00Z", &ok)
+        verify_and_save_core(&dir, Some("/p"), "CLE-TEST-12345678", "2026-11-04T10:00:00Z", &ok).await
             .unwrap();
         let ko = FakeTransport::replying(&url, Ok((401, None, "revoquee".into())));
         let err =
-            test_stored_core(&dir, Some("/p"), &ko).expect_err("clé révoquée → bandeau");
+            test_stored_core(&dir, Some("/p"), &ko).await.expect_err("clé révoquée → bandeau");
         assert!(err.contains("Paramètres"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1324,27 +1343,63 @@ mod tests {
     }
 
     impl LlmTransport for ScriptTransport {
-        fn get_models(&self, url: &str, _key: &str) -> Result<RawResponse, String> {
-            self.calls.lock().unwrap().push(url.to_string());
-            self.queue.lock().unwrap().pop_front().unwrap_or(Err("script épuisé".into()))
+        fn get_models<'a>(&'a self, url: &'a str, _key: &'a str) -> TransportFut<'a> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(url.to_string());
+                self.queue.lock().unwrap().pop_front().unwrap_or(Err("script épuisé".into()))
+            })
         }
-        fn post_chat(&self, url: &str, _key: &str, _body: &str) -> Result<RawResponse, String> {
-            self.calls.lock().unwrap().push(url.to_string());
-            self.queue.lock().unwrap().pop_front().unwrap_or(Err("script épuisé".into()))
+        fn post_chat<'a>(&'a self, url: &'a str, _key: &'a str, _body: &'a str) -> TransportFut<'a> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(url.to_string());
+                self.queue.lock().unwrap().pop_front().unwrap_or(Err("script épuisé".into()))
+            })
         }
     }
 
-    #[test]
-    fn prod_transport_refuse_hors_allowlist_sans_reseau() {
+    #[tokio::test]
+    async fn prod_transport_refuse_hors_allowlist_sans_reseau() {
         let t = ReqwestTransport::new();
-        let err = t.get_models("https://evil.com/v1/models", "k").expect_err("deny");
+        let err = t.get_models("https://evil.com/v1/models", "k").await.expect_err("deny");
         assert!(err.contains("allowlist"), "{err}");
-        let err = t.post_chat("https://api.openai.com/v1/chat/completions", "k", "{}").expect_err("deny");
+        let err = t.post_chat("https://api.openai.com/v1/chat/completions", "k", "{}").await.expect_err("deny");
         assert!(err.contains("allowlist"), "{err}");
     }
 
-    #[test]
-    fn retry_429_puis_succes() {
+    /// Régression crash validation de clé : le transport réel doit pouvoir
+    /// tourner DANS un contexte async (commandes Tauri `async`) sans
+    /// `block_on` — qui paniquait sur le thread principal ("no reactor
+    /// running") et tuait l'app (release `panic = "abort"`).
+    /// Serveur stub local (127.0.0.1 allowlisté), aucune clé réelle.
+    #[tokio::test]
+    async fn prod_transport_fonctionne_en_contexte_async_sans_block_on() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = r#"{"data":[{"id":"muse-spark-1.3"}]}"#;
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            use std::io::Read;
+            let _ = stream.read(&mut buf);
+            stream.write_all(raw.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+        let t = ReqwestTransport::new();
+        let url = format!("http://127.0.0.1:{port}/v1/models");
+        // Si un `block_on` subsistait, cette ligne paniquerait ici même.
+        let (status, _, resp_body) = t.get_models(&url, "FAUSSE-CLE-TEST").await.unwrap();
+        assert_eq!(status, 200);
+        assert!(resp_body.contains("muse-spark-1.3"), "{resp_body}");
+    }
+
+    #[tokio::test]
+    async fn retry_429_puis_succes() {
         let t = ScriptTransport::scripted(vec![
             Ok((429, Some("0".into()), "lent".into())),
             Ok((200, None, r#"{"choices":[]}"#.into())),
@@ -1352,28 +1407,28 @@ mod tests {
         let slept = std::sync::Mutex::new(Vec::new());
         let out = call_with_retry(
             &mut || t.post_chat("https://api.meta.ai/v1/chat/completions", "k", "{}"),
-            &|ms| slept.lock().unwrap().push(ms),
-        )
+            &|ms: u64| -> SleepFut { slept.lock().unwrap().push(ms); Box::pin(async {}) },
+        ).await
         .unwrap();
         assert_eq!(out.0, 200);
         assert_eq!(t.ncalls(), 2);
         assert_eq!(slept.lock().unwrap().len(), 1);
     }
 
-    #[test]
-    fn pas_de_retry_sur_401() {
+    #[tokio::test]
+    async fn pas_de_retry_sur_401() {
         let t = ScriptTransport::scripted(vec![Ok((401, None, "non".into()))]);
         let out = call_with_retry(
             &mut || t.post_chat("https://api.meta.ai/v1/chat/completions", "k", "{}"),
-            &|_| {},
-        )
+            &|_: u64| -> SleepFut { Box::pin(async {}) },
+        ).await
         .unwrap();
         assert_eq!(out.0, 401);
         assert_eq!(t.ncalls(), 1, "401 ne se rejoue jamais");
     }
 
-    #[test]
-    fn abandon_apres_max_tentatives() {
+    #[tokio::test]
+    async fn abandon_apres_max_tentatives() {
         let t = ScriptTransport::scripted(vec![
             Ok((500, None, "a".into())),
             Ok((503, None, "b".into())),
@@ -1382,8 +1437,8 @@ mod tests {
         ]);
         let err = call_with_retry(
             &mut || t.post_chat("https://api.meta.ai/v1/chat/completions", "k", "{}"),
-            &|_| {},
-        )
+            &|_: u64| -> SleepFut { Box::pin(async {}) },
+        ).await
         .expect_err("abandon");
         assert!(err.contains("tentatives"), "{err}");
         assert_eq!(t.ncalls(), 3, "1 essai + 2 retries");
@@ -1409,8 +1464,8 @@ mod tests {
         assert_eq!(tokens, 9);
     }
 
-    #[test]
-    fn chat_401_bandeau_rouvre_parametres() {
+    #[tokio::test]
+    async fn chat_401_bandeau_rouvre_parametres() {
         let dir = tmpdir("chat401");
         save_vault(&dir, "CLE-TEST-12345678", "2026-11-04T10:00:00Z", "default").unwrap();
         let t = ScriptTransport::scripted(vec![Ok((401, None, "non".into()))]);
@@ -1421,14 +1476,14 @@ mod tests {
             consent: true,
             mode: "chat".into(),
         };
-        let err = complete_core(&dir, Some("/p"), &req, &t, &|_| {}).expect_err("401");
+        let err = complete_core(&dir, Some("/p"), &req, &t, &|_: u64| -> SleepFut { Box::pin(async {}) }).await.expect_err("401");
         assert!(err.contains("Paramètres"), "{err}");
         assert_eq!(t.ncalls(), 1, "401 ne se rejoue jamais");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn chat_sans_cle_refuse_avant_reseau() {
+    #[tokio::test]
+    async fn chat_sans_cle_refuse_avant_reseau() {
         let dir = tmpdir("chatnocle");
         let t = ScriptTransport::scripted(vec![Ok((200, None, "{}".into()))]);
         let req = ChatRequest {
@@ -1438,14 +1493,14 @@ mod tests {
             consent: true,
             mode: "chat".into(),
         };
-        let err = complete_core(&dir, Some("/p"), &req, &t, &|_| {}).expect_err("sans clé");
+        let err = complete_core(&dir, Some("/p"), &req, &t, &|_: u64| -> SleepFut { Box::pin(async {}) }).await.expect_err("sans clé");
         assert!(err.contains("aucune clé"), "{err}");
         assert_eq!(t.ncalls(), 0, "aucun appel réseau");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn chat_sans_projet_refuse_avant_reseau() {
+    #[tokio::test]
+    async fn chat_sans_projet_refuse_avant_reseau() {
         let dir = tmpdir("chatnoproject");
         save_vault(&dir, "CLE-TEST-12345678", "2026-11-04T10:00:00Z", "default").unwrap();
         let t = ScriptTransport::scripted(vec![Ok((200, None, "{}".into()))]);
@@ -1456,14 +1511,14 @@ mod tests {
             consent: true,
             mode: "chat".into(),
         };
-        let err = complete_core(&dir, None, &req, &t, &|_| {}).expect_err("NO_PROJECT_OPEN");
+        let err = complete_core(&dir, None, &req, &t, &|_: u64| -> SleepFut { Box::pin(async {}) }).await.expect_err("NO_PROJECT_OPEN");
         assert!(err.contains("NO_PROJECT_OPEN"), "{err}");
         assert_eq!(t.ncalls(), 0, "aucun appel réseau");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn chat_succes_compte_jetons_session() {        let dir = tmpdir("chatok");
+    #[tokio::test]
+    async fn chat_succes_compte_jetons_session() {        let dir = tmpdir("chatok");
         save_vault(&dir, "CLE-TEST-12345678", "2026-11-04T10:00:00Z", "default").unwrap();
         let body = r#"{"choices":[{"message":{"content":"ok"}}],"usage":{"total_tokens":30}}"#;
         let t = ScriptTransport::scripted(vec![Ok((200, None, body.into()))]);
@@ -1474,7 +1529,7 @@ mod tests {
             consent: true,
             mode: "chat".into(),
         };
-        let reply = complete_core(&dir, Some("/p/projet"), &req, &t, &|_| {}).unwrap();
+        let reply = complete_core(&dir, Some("/p/projet"), &req, &t, &|_: u64| -> SleepFut { Box::pin(async {}) }).await.unwrap();
         assert_eq!(reply.text, "ok");
         assert_eq!(reply.tokens_used, 30);
         let meta = load_vault_meta(&dir).unwrap();
@@ -1496,55 +1551,55 @@ mod tests {
 
     // --- liste live `llm_models` (US7/US9) : GET /v1/models via allowlist ---
 
-    #[test]
-    fn modeles_liste_200_ids() {
+    #[tokio::test]
+    async fn modeles_liste_200_ids() {
         let dir = tmpdir("modelsok");
         save_vault(&dir, "CLE-TEST-12345678", "2026-11-04T10:00:00Z", "default").unwrap();
         let url = models_url(META_API_BASE).unwrap();
         let t = FakeTransport::replying(&url, Ok((200, None, r#"{"data":[{"id":"muse-spark-1.3"},{"id":"autre"}]}"#.into())));
-        let ids = list_models_core(&dir, Some("/p"), &t).unwrap();
+        let ids = list_models_core(&dir, Some("/p"), &t).await.unwrap();
         assert_eq!(ids, vec!["muse-spark-1.3".to_string(), "autre".to_string()]);
         assert_eq!(t.calls.lock().unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn modeles_liste_200_enveloppe_inattendue_repli_vide() {
+    #[tokio::test]
+    async fn modeles_liste_200_enveloppe_inattendue_repli_vide() {
         let dir = tmpdir("modelsempty");
         save_vault(&dir, "CLE-TEST-12345678", "2026-11-04T10:00:00Z", "default").unwrap();
         let url = models_url(META_API_BASE).unwrap();
         let t = FakeTransport::replying(&url, Ok((200, None, "{}".into())));
-        assert_eq!(list_models_core(&dir, Some("/p"), &t).unwrap(), Vec::<String>::new());
+        assert_eq!(list_models_core(&dir, Some("/p"), &t).await.unwrap(), Vec::<String>::new());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn modeles_liste_401_cle_invalide() {
+    #[tokio::test]
+    async fn modeles_liste_401_cle_invalide() {
         let dir = tmpdir("models401");
         save_vault(&dir, "CLE-TEST-12345678", "2026-11-04T10:00:00Z", "default").unwrap();
         let url = models_url(META_API_BASE).unwrap();
         let t = FakeTransport::replying(&url, Ok((401, None, "bad".into())));
-        let err = list_models_core(&dir, Some("/p"), &t).expect_err("401");
+        let err = list_models_core(&dir, Some("/p"), &t).await.expect_err("401");
         assert!(err.contains("invalide") || err.contains("révoquée"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn modeles_liste_sans_cle_refuse_avant_reseau() {
+    #[tokio::test]
+    async fn modeles_liste_sans_cle_refuse_avant_reseau() {
         let dir = tmpdir("modelsnocle");
         let t = ScriptTransport::scripted(vec![Ok((200, None, "{}".into()))]);
-        let err = list_models_core(&dir, Some("/p"), &t).expect_err("sans clé");
+        let err = list_models_core(&dir, Some("/p"), &t).await.expect_err("sans clé");
         assert!(err.contains("aucune clé"), "{err}");
         assert_eq!(t.ncalls(), 0, "aucun appel réseau");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn modeles_liste_sans_projet_refuse_avant_reseau() {
+    #[tokio::test]
+    async fn modeles_liste_sans_projet_refuse_avant_reseau() {
         let dir = tmpdir("modelsnoproject");
         save_vault(&dir, "CLE-TEST-12345678", "2026-11-04T10:00:00Z", "default").unwrap();
         let t = ScriptTransport::scripted(vec![Ok((200, None, "{}".into()))]);
-        let err = list_models_core(&dir, None, &t).expect_err("NO_PROJECT_OPEN");
+        let err = list_models_core(&dir, None, &t).await.expect_err("NO_PROJECT_OPEN");
         assert!(err.contains("NO_PROJECT_OPEN"), "{err}");
         assert_eq!(t.ncalls(), 0, "aucun appel réseau");
         let _ = std::fs::remove_dir_all(&dir);

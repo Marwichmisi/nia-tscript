@@ -2,6 +2,15 @@
 
 Tout changement notable est documenté ici. Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/).
 
+## [0.1.4] - 2026-11-04
+
+Agent intégré branché (chat B + AI SDK + Meta), BYOK chiffrée, sync Projet ouvert, MCP durci — et deux corrections bloquantes remontées des tests terrain.
+
+### Corrigé
+- Crash à la validation de la clé (panic `no reactor running` sur le thread principal, release `panic = "abort"`) : transport LLM passé en async de bout en bout, commandes Tauri `async`, test de régression avec serveur stub local.
+- L'app rouvrait le dernier Projet au lieu de l'Accueil : suppression de la reprise Registre au boot (sans lockfile → Accueil ; lockfile survivant d'un crash → rouverture, voulu).
+- Écran noir au premier lancement : zod 4 hissé cassait tscircuit à l'import (`z.function().args is not a function`) ; pin zod 3.25.76 imbriqué côté tscircuit + v4 conservé pour l'AI SDK (`src/scripts/pin-zod-v3.mjs` en `postinstall`).
+
 ## [0.1.3] - 2026-11-03
 
 Stabilisation du Studio piloté par MCP : l'application suit désormais l'agent en temps réel, le Registre est atomique, les opérations dossier sont confinées et la compilation est alignée des deux côtés.
